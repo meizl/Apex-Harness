@@ -46,6 +46,9 @@ class PluginMeta(type):
         cls.provides = list(dict.fromkeys(provides))  # type: ignore[attr-defined]
         return cls
 
+
+
+
 #所有插件的父类，任何插件都要继承它
 class Plugin(metaclass=PluginMeta):
     """Base class for all plugins.
