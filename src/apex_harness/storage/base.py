@@ -1,0 +1,1 @@
+"""Storage base interface."""
