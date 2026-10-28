@@ -17,7 +17,12 @@ from .context import Context
 
 logger = logging.getLogger(__name__)
 
-#元类，自动合并父类和子类的`requires` /`provides` 
+#它让子类只需要写 自己新增的 依赖，父类的依赖自动继承下来，不用重复写
+#class BasePlugin(Plugin):
+#     requires = ["config"]
+
+# class MyPlugin(BasePlugin):
+#     requires = ["llm"]
 class PluginMeta(type):
     """Metaclass that collects ``requires`` / ``provides`` from the MRO.
 
@@ -63,10 +68,10 @@ class Plugin(metaclass=PluginMeta):
     #: Human-readable description.
     description: ClassVar[str] = ""
 
-    #: Service names this plugin requires before it can start.
+    #: 我依赖谁
     requires: ClassVar[list[str]] = []
 
-    #: Service names this plugin registers during setup.
+    #: 我能提供什么
     provides: ClassVar[list[str]] = []
 
     def __init__(self) -> None:
@@ -74,7 +79,7 @@ class Plugin(metaclass=PluginMeta):
         self._started: bool = False
 
     # -- lifecycle hooks (override these) ----------------------------------
-    
+    #装
     async def setup(self) -> None:
         """Called once when the plugin is mounted.
 
@@ -82,17 +87,18 @@ class Plugin(metaclass=PluginMeta):
         At this point dependencies may not have started yet, so only use
         services you registered yourself.
         """
-
+    #跑
     async def start(self) -> None:
         """Called after all dependencies have started.
 
         Use this for work that depends on other plugins' services being
         available (e.g. connecting to an LLM provider).
         """
-
+    #停
     async def stop(self) -> None:
         """Called when the harness is shutting down, before :meth:`dispose`."""
 
+    #拆
     async def dispose(self) -> None:
         """Final cleanup. Most cleanup is handled automatically by the context."""
 

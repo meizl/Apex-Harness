@@ -25,8 +25,10 @@ class Event:
     carries a free-form ``payload`` dict for convenience.
     """
 
-    #: Event name used for routing. Override in subclasses.
-    name: str = "event"
+    #: 事件名字
+    #： payload   事件携带的数据
+    #： propagate   是否继续往下传
+    name: str = "event"                                                             
 
     def __init__(self, **payload: Any) -> None:
         self.payload: dict[str, Any] = payload
@@ -52,11 +54,12 @@ class EventBus:
         self._handlers: dict[str, list[EventHandler]] = defaultdict(list)
 
     # -- registration ------------------------------------------------------
-
+    #"这个事件发生了叫我"
     def on(self, event_name: str, handler: EventHandler) -> None:
         """Register *handler* for events named *event_name*."""
         self._handlers[event_name].append(handler)
 
+    #"我不听了"
     def off(self, event_name: str, handler: EventHandler) -> None:
         """Remove a previously registered handler. Unknown names are ignored."""
         if event_name in self._handlers:
@@ -64,7 +67,7 @@ class EventBus:
                 self._handlers[event_name].remove(handler)
             except ValueError:
                 pass
-
+    #"把这封信按地址送出去"
     def subscribe(self, event_name: str) -> Callable[[EventHandler], EventHandler]:
         """Decorator to register a handler for *event_name*.
 
