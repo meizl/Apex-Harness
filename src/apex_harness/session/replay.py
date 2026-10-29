@@ -4,54 +4,42 @@ from __future__ import annotations
 
 from typing import Any
 
-from .message import Message
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+    messages_from_dict,
+)
+
 from .session import Session
 
+# 事件日志里存的是 message.model_dump() 结果，type 字段标识角色。
+_TYPE_TO_CLASS: dict[str, type[BaseMessage]] = {
+    "system": SystemMessage,
+    "human": HumanMessage,
+    "ai": AIMessage,
+    "tool": ToolMessage,
+}
 
-def replay_messages(session: Session) -> list[Message]:
+
+def replay_messages(session: Session) -> list[BaseMessage]:
     """从事件日志重建消息序列。
 
     只提取日志中 ``type == "message"`` 的条目，按写入顺序还原为
-    :class:`Message` 列表。
+    LangChain :class:`BaseMessage` 列表。
     """
-    messages: list[Message] = []
+    messages: list[BaseMessage] = []
     for entry in session.log:
         if entry.get("type") != "message":
             continue
-        data = entry.get("data", {})
-        msg_data = data.get("message", {})
-        message = Message(
-            msg_data.get("content", ""),
-            tool_calls=msg_data.get("tool_calls") or [],
-            tool_call_id=msg_data.get("tool_call_id"),
-            name=msg_data.get("name"),
-            metadata=msg_data.get("metadata") or {},
-        )
-        # 尽量还原角色。
-        role = msg_data.get("role")
-        if role:
-            from .message import (
-                AssistantMessage,
-                SystemMessage,
-                ToolMessage,
-                UserMessage,
-            )
-
-            role_map = {
-                "system": SystemMessage,
-                "user": UserMessage,
-                "assistant": AssistantMessage,
-                "tool": ToolMessage,
-            }
-            cls = role_map.get(role, Message)
-            message = cls(
-                msg_data.get("content", ""),
-                tool_calls=msg_data.get("tool_calls") or [],
-                tool_call_id=msg_data.get("tool_call_id"),
-                name=msg_data.get("name"),
-                metadata=msg_data.get("metadata") or {},
-            )
-        messages.append(message)
+        msg_dump = entry.get("data", {}).get("message", {})
+        msg_type = msg_dump.get("type", "human")
+        cls = _TYPE_TO_CLASS.get(msg_type, HumanMessage)
+        # 过滤掉 None 值，避免给不需要的字段传 None。
+        kwargs = {k: v for k, v in msg_dump.items() if v is not None}
+        messages.append(cls(**kwargs))
     return messages
 
 

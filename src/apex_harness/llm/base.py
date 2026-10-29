@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, ClassVar
 
+from langchain_core.messages import AIMessage, BaseMessage
+
 from apex_harness.core.plugin import Plugin
 
 
@@ -18,15 +20,25 @@ class LLMProvider(Plugin):
     #: 模型标识，如 ``"gpt-4"``。由具体实现覆盖。
     model: ClassVar[str] = ""
 
-    async def chat(self, messages: list[dict[str, Any]], **kwargs: Any) -> str:
-        """对话补全：传入消息列表，返回助手的文本回复。
+    async def chat(
+        self,
+        messages: list[BaseMessage],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        **kwargs: Any,
+    ) -> AIMessage:
+        """对话补全：传入 LangChain 消息列表，返回 :class:`AIMessage`。
 
-        ``messages`` 格式为角色-内容字典列表::
+        ``messages`` 是 LangChain :class:`BaseMessage` 列表::
 
             [
-                {"role": "system", "content": "你是一个助手"},
-                {"role": "user", "content": "你好"},
+                SystemMessage(content="你是一个助手"),
+                HumanMessage(content="你好"),
             ]
+
+        ``tools`` 是可选的工具定义列表（JSON Schema 格式），传入后模型可以
+        选择发起工具调用，返回的 :class:`AIMessage` 的 ``tool_calls`` 字段
+        会携带这些调用。
 
         ``kwargs`` 用于透传温度、最大 token 等生成参数。
         """

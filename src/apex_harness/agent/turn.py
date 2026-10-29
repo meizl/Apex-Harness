@@ -35,7 +35,8 @@ class Turn:
 
         # 2. 调 LLM 生成回复
         messages = self.session.to_llm_format()
-        reply = await self.llm.chat(messages, **kwargs)
+        response = await self.llm.chat(messages, **kwargs)
+        reply = response.content
 
         # 3. 记录助手消息并返回
         self.session.add_assistant(reply)

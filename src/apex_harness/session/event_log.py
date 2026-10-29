@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from typing import Any, Iterator
 
-from .message import Message
+from langchain_core.messages import BaseMessage
 
 
 class EventLog:
@@ -32,9 +32,9 @@ class EventLog:
         self._entries.append(entry)
         return entry
 
-    def record_message(self, message: Message) -> dict[str, Any]:
+    def record_message(self, message: BaseMessage) -> dict[str, Any]:
         """便捷方法：记录一条消息。"""
-        return self.append("message", message=message.to_dict())
+        return self.append("message", message=message.model_dump())
 
     def __len__(self) -> int:
         return len(self._entries)

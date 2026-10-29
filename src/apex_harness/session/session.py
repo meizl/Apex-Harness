@@ -5,8 +5,9 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+from langchain_core.messages import BaseMessage
+
 from .event_log import EventLog
-from .message import Message
 
 
 class Session:
@@ -26,52 +27,57 @@ class Session:
         self.id = session_id or uuid.uuid4().hex
         #: 会话元信息（标题、创建时间等）。
         self.metadata = metadata or {}
-        #: 消息历史。
-        self.messages: list[Message] = []
+        #: 消息历史（LangChain BaseMessage 列表）。
+        self.messages: list[BaseMessage] = []
         #: 事件日志（append-only）。
         self.log = EventLog()
 
     # -- 消息 --------------------------------------------------------------
 
-    def add_message(self, message: Message) -> Message:
+    def add_message(self, message: BaseMessage) -> BaseMessage:
         """追加一条消息到历史，同时写入事件日志。"""
         self.messages.append(message)
         self.log.record_message(message)
         return message
 
-    def add_user(self, content: str, **kwargs: Any) -> Message:
-        """便捷方法：追加一条用户消息。"""
+    def add_user(self, content: str, **kwargs: Any) -> BaseMessage:
+        """便捷方法：追加一条用户消息（HumanMessage）。"""
         from .message import UserMessage
 
-        return self.add_message(UserMessage(content, **kwargs))
+        return self.add_message(UserMessage(content=content, **kwargs))
 
-    def add_assistant(self, content: str, **kwargs: Any) -> Message:
-        """便捷方法：追加一条助手消息。"""
+    def add_assistant(self, content: str, **kwargs: Any) -> BaseMessage:
+        """便捷方法：追加一条助手消息（AIMessage）。
+
+        可通过 ``tool_calls=`` 传入工具调用列表。
+        """
         from .message import AssistantMessage
 
-        return self.add_message(AssistantMessage(content, **kwargs))
+        return self.add_message(AssistantMessage(content=content, **kwargs))
 
-    def add_system(self, content: str, **kwargs: Any) -> Message:
+    def add_system(self, content: str, **kwargs: Any) -> BaseMessage:
         """便捷方法：追加一条系统消息。"""
         from .message import SystemMessage
 
-        return self.add_message(SystemMessage(content, **kwargs))
+        return self.add_message(SystemMessage(content=content, **kwargs))
 
-    def add_tool(self, content: str, tool_call_id: str, **kwargs: Any) -> Message:
+    def add_tool(self, content: str, tool_call_id: str, **kwargs: Any) -> BaseMessage:
         """便捷方法：追加一条工具结果消息。"""
         from .message import ToolMessage
 
-        return self.add_message(ToolMessage(content, tool_call_id=tool_call_id, **kwargs))
+        return self.add_message(
+            ToolMessage(content=content, tool_call_id=tool_call_id, **kwargs)
+        )
 
     # -- 查询 --------------------------------------------------------------
 
-    def history(self) -> list[Message]:
+    def history(self) -> list[BaseMessage]:
         """返回消息历史（浅拷贝）。"""
         return list(self.messages)
 
-    def to_llm_format(self) -> list[dict[str, Any]]:
-        """把历史消息转成 LLM 可接受的字典列表。"""
-        return [m.to_dict() for m in self.messages]
+    def to_llm_format(self) -> list[BaseMessage]:
+        """返回 LLM 可接受的消息列表（LangChain BaseMessage 列表）。"""
+        return list(self.messages)
 
     def __len__(self) -> int:
         return len(self.messages)

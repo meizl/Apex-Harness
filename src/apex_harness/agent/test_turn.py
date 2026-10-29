@@ -17,6 +17,7 @@ import pytest
 from apex_harness.agent.turn import Turn
 from apex_harness.llm.base import LLMProvider
 from apex_harness.session.session import Session
+from langchain_core.messages import AIMessage, BaseMessage
 
 
 class FakeLLM(LLMProvider):
@@ -27,9 +28,15 @@ class FakeLLM(LLMProvider):
         self.reply = reply
         self.calls: list[dict[str, Any]] = []
 
-    async def chat(self, messages: list[dict[str, Any]], **kwargs: Any) -> str:
-        self.calls.append({"messages": messages, "kwargs": kwargs})
-        return self.reply
+    async def chat(
+        self,
+        messages: list[BaseMessage],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        **kwargs: Any,
+    ) -> AIMessage:
+        self.calls.append({"messages": messages, "tools": tools, "kwargs": kwargs})
+        return AIMessage(content=self.reply)
 
 
 @pytest.fixture
@@ -49,8 +56,8 @@ async def test_run_records_user_message(session: Session, llm: FakeLLM) -> None:
 
     await turn.run("今天天气怎么样？")
 
-    roles = [m.role for m in session.history()]
-    assert roles == ["system", "user", "assistant"]
+    roles = [m.type for m in session.history()]
+    assert roles == ["system", "human", "ai"]
     assert session.history()[1].content == "今天天气怎么样？"
 
 
@@ -63,10 +70,10 @@ async def test_run_passes_session_messages_to_llm(session: Session, llm: FakeLLM
     await turn.run("你好")
 
     sent = llm.calls[0]["messages"]
-    assert [m["role"] for m in sent] == ["system", "user"]
+    assert [m.type for m in sent] == ["system", "human"]
     # 发出去的消息在 run 之前就已确定（不含之后追加的 assistant）
     assert sent[:-1] == expected
-    assert sent[-1] == {"role": "user", "content": "你好"}
+    assert sent[-1].content == "你好"
 
 
 async def test_run_records_assistant_reply(session: Session, llm: FakeLLM) -> None:
@@ -75,7 +82,7 @@ async def test_run_records_assistant_reply(session: Session, llm: FakeLLM) -> No
     await turn.run("hi")
 
     assistant_msg = session.history()[-1]
-    assert assistant_msg.role == "assistant"
+    assert assistant_msg.type == "ai"
     assert assistant_msg.content == "你好，我是助手"
 
 

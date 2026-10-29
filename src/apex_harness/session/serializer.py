@@ -6,20 +6,23 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .message import (
-    AssistantMessage,
-    Message,
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
     SystemMessage,
     ToolMessage,
-    UserMessage,
+    message_to_dict,
+    messages_from_dict,
 )
+
 from .session import Session
 
-# 消息角色 -> 消息类，用于反序列化时还原正确类型。
-_ROLE_TO_CLASS: dict[str, type[Message]] = {
+# LangChain 消息 type -> 消息类，用于反序列化兜底。
+_TYPE_TO_CLASS: dict[str, type[BaseMessage]] = {
     "system": SystemMessage,
-    "user": UserMessage,
-    "assistant": AssistantMessage,
+    "human": HumanMessage,
+    "ai": AIMessage,
     "tool": ToolMessage,
 }
 
@@ -29,17 +32,7 @@ def serialize_session(session: Session) -> dict[str, Any]:
     return {
         "id": session.id,
         "metadata": session.metadata,
-        "messages": [
-            {
-                "role": m.role,
-                "content": m.content,
-                "tool_calls": m.tool_calls,
-                "tool_call_id": m.tool_call_id,
-                "name": m.name,
-                "metadata": m.metadata,
-            }
-            for m in session.messages
-        ],
+        "messages": [message_to_dict(m) for m in session.messages],
         "log": session.log.entries(),
     }
 
@@ -48,17 +41,16 @@ def deserialize_session(data: dict[str, Any]) -> Session:
     """从字典还原会话（消息历史 + 事件日志）。"""
     session = Session(session_id=data.get("id"), metadata=data.get("metadata") or {})
 
-    for msg_data in data.get("messages", []):
-        role = msg_data.get("role", "user")
-        cls = _ROLE_TO_CLASS.get(role, Message)
-        message = cls(
-            msg_data.get("content", ""),
-            tool_calls=msg_data.get("tool_calls") or [],
-            tool_call_id=msg_data.get("tool_call_id"),
-            name=msg_data.get("name"),
-            metadata=msg_data.get("metadata") or {},
-        )
-        session.messages.append(message)
+    raw_messages = data.get("messages", [])
+    if raw_messages:
+        # 优先用 LangChain 自带的还原（兼容 message_to_dict 格式）。
+        try:
+            session.messages = list(messages_from_dict(raw_messages))
+        except Exception:  # noqa: BLE001 - 兜底：手动按 type 还原
+            for msg_data in raw_messages:
+                msg_type = msg_data.get("type", "human")
+                cls = _TYPE_TO_CLASS.get(msg_type, HumanMessage)
+                session.messages.append(cls(**msg_data))
 
     # 还原事件日志（重新 append，保留原始时间戳）。
     for entry in data.get("log", []):
