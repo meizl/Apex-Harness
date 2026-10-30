@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from typing import Any, AsyncIterator, ClassVar
 
 from langchain_core.messages import AIMessage, BaseMessage
 
@@ -43,6 +43,22 @@ class LLMProvider(Plugin):
         ``kwargs`` 用于透传温度、最大 token 等生成参数。
         """
         raise NotImplementedError
+
+    async def stream(
+        self,
+        messages: list[BaseMessage],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[str]:
+        """流式对话：逐个产出文本片段，适合实时展示。
+
+        参数与 :meth:`chat` 一致，但返回一个异步迭代器，每次 ``yield``
+        一段增量文本。默认实现回退为一次性 ``chat`` 后整体产出。
+        """
+        reply = await self.chat(messages, tools=tools, **kwargs)
+        if reply.content:
+            yield reply.content
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         """文本嵌入：传入文本列表，返回等长的向量列表。"""
