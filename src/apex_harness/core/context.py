@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 DisposeCallback = Callable[[], Awaitable[None] | None]
 
-
+#插件通过 ctx 注册服务、监听事件、注册清理回调
 class Context:
     """The runtime context provided to a plugin during its lifecycle.
 

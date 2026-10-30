@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 # A handler receives an Event and returns nothing (sync or async).
 EventHandler = Callable[["Event"], Awaitable[None] | None]
 
-
+#事件
 class Event:
     """Base event class.
 
@@ -42,7 +42,7 @@ class Event:
     def __repr__(self) -> str:  # pragma: no cover - debug helper
         return f"<{type(self).__name__} name={self.name!r} payload={self.payload!r}>"
 
-
+#事件相关的一些函数
 class EventBus:
     """A simple publish/subscribe event bus.
 

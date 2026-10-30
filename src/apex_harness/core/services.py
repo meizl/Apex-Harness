@@ -22,6 +22,8 @@ class ServiceRegistry:
 
     # -- mutation ----------------------------------------------------------
 
+
+    #注册服务
     def register(self, name: str, service: Any) -> None:
         """Register *service* under *name*.
 
@@ -32,12 +34,13 @@ class ServiceRegistry:
             raise KeyError(f"Service '{name}' is already registered")
         self._services[name] = service
 
+    #取消服务
     def unregister(self, name: str) -> None:
         """Remove *name* from the registry. Unknown names are ignored."""
         self._services.pop(name, None)
 
     # -- lookup ------------------------------------------------------------
-
+    #获取服务
     def get(self, name: str, default: Any = None) -> Any:
         """Return the service registered under *name*, or *default*."""
         return self._services.get(name, default)
