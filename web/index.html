@@ -37,40 +37,27 @@
     display: flex;
     align-items: baseline;
     gap: 8px;
-    padding: 20px 24px;
+    padding: 16px 24px;
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
   }
 
-  header h1 {
-    font-size: 17px;
-    font-weight: 600;
-  }
-
-  header .status {
-    margin-left: auto;
-    font-size: 12px;
-    color: var(--muted);
-  }
+  header h1 { font-size: 16px; font-weight: 600; }
+  header .status { margin-left: auto; font-size: 12px; color: var(--muted); }
 
   #messages {
     flex: 1;
     overflow-y: auto;
-    padding: 28px 24px;
+    padding: 24px;
   }
 
-  .msg {
-    margin-bottom: 22px;
-  }
+  .msg { margin-bottom: 18px; }
 
-  .msg.user {
-    display: flex;
-    justify-content: flex-end;
-  }
+  .msg.user { display: flex; justify-content: flex-end; }
 
   .msg.user .bubble {
     background: var(--user-bg);
-    padding: 9px 14px;
+    padding: 8px 14px;
     border-radius: 12px;
     max-width: 75%;
     white-space: pre-wrap;
@@ -83,21 +70,31 @@
     max-width: 92%;
   }
 
-  .msg.assistant .bubble.pending {
-    color: var(--muted);
-  }
+  .msg.assistant .bubble.pending { color: var(--muted); }
 
   footer {
     flex-shrink: 0;
-    padding: 16px 24px 24px;
+    padding: 12px 24px 20px;
     border-top: 1px solid var(--border);
   }
 
-  .input-wrap {
+  .input-row {
     display: flex;
-    gap: 10px;
+    gap: 8px;
     align-items: flex-end;
   }
+
+  .icon-btn {
+    background: none;
+    border: none;
+    color: var(--muted);
+    cursor: pointer;
+    padding: 10px;
+    font-size: 18px;
+    line-height: 1;
+    border-radius: 8px;
+  }
+  .icon-btn:hover { background: #f0f1f3; color: var(--text); }
 
   textarea {
     flex: 1;
@@ -106,34 +103,57 @@
     color: var(--text);
     border: 1px solid transparent;
     border-radius: 12px;
-    padding: 11px 16px;
+    padding: 10px 14px;
     font-family: inherit;
     font-size: 15px;
     line-height: 1.5;
-    max-height: 160px;
+    max-height: 140px;
     outline: none;
     transition: border-color .15s, background .15s;
   }
+  textarea:focus { background: #fff; border-color: var(--accent); }
 
-  textarea:focus {
-    background: #fff;
-    border-color: var(--accent);
-  }
-
-  button {
+  button.send {
     background: var(--accent);
     color: #fff;
     border: none;
     border-radius: 12px;
-    padding: 11px 22px;
+    padding: 10px 20px;
     font-size: 15px;
     font-weight: 500;
     cursor: pointer;
     flex-shrink: 0;
   }
+  button.send:hover { background: #2f6fe0; }
+  button.send:disabled { opacity: .5; cursor: not-allowed; }
 
-  button:hover { background: #2f6fe0; }
-  button:disabled { opacity: .5; cursor: not-allowed; }
+  /* 参数面板：默认收起 */
+  .params {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height .25s ease;
+  }
+  .params.open { max-height: 320px; }
+
+  .params-inner {
+    padding: 14px 4px 4px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px 16px;
+  }
+
+  .field { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+  .field label { color: var(--muted); min-width: 70px; flex-shrink: 0; }
+  .field input[type="range"] { flex: 1; accent-color: var(--accent); }
+  .field input[type="number"] {
+    width: 70px;
+    padding: 4px 6px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 12px;
+    text-align: right;
+  }
+  .field .val { min-width: 32px; text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
@@ -145,9 +165,39 @@
   <div id="messages"></div>
 
   <footer>
-    <div class="input-wrap">
+    <div class="params" id="params">
+      <div class="params-inner">
+        <div class="field">
+          <label>温度</label>
+          <input type="range" id="temperature" min="0" max="2" step="0.1" value="0.7">
+          <span class="val" id="temperatureVal">0.7</span>
+        </div>
+        <div class="field">
+          <label>Top P</label>
+          <input type="range" id="top_p" min="0" max="1" step="0.05" value="1">
+          <span class="val" id="top_pVal">1.0</span>
+        </div>
+        <div class="field">
+          <label>最大长度</label>
+          <input type="number" id="max_tokens" min="1" placeholder="不限">
+        </div>
+        <div class="field">
+          <label>频率惩罚</label>
+          <input type="range" id="frequency_penalty" min="-2" max="2" step="0.1" value="0">
+          <span class="val" id="frequency_penaltyVal">0.0</span>
+        </div>
+        <div class="field">
+          <label>存在惩罚</label>
+          <input type="range" id="presence_penalty" min="-2" max="2" step="0.1" value="0">
+          <span class="val" id="presence_penaltyVal">0.0</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="input-row">
+      <button class="icon-btn" id="toggleParams" title="参数">⚙</button>
       <textarea id="input" rows="1" placeholder="输入消息，回车发送，Shift+回车换行"></textarea>
-      <button id="send">发送</button>
+      <button class="send" id="send">发送</button>
     </div>
   </footer>
 
@@ -156,15 +206,26 @@
   const inputEl = document.getElementById('input');
   const sendBtn = document.getElementById('send');
   const statusEl = document.getElementById('status');
+  const paramsEl = document.getElementById('params');
+  const toggleParamsBtn = document.getElementById('toggleParams');
+
+  const fields = ['temperature', 'top_p', 'frequency_penalty', 'presence_penalty'];
+  fields.forEach(id => {
+    const el = document.getElementById(id);
+    const valEl = document.getElementById(id + 'Val');
+    el.addEventListener('input', () => {
+      valEl.textContent = parseFloat(el.value).toFixed(id === 'temperature' || id === 'top_p' ? 1 : 1);
+    });
+  });
+
+  toggleParamsBtn.addEventListener('click', () => paramsEl.classList.toggle('open'));
 
   function addMessage(role, text, pending) {
     const wrap = document.createElement('div');
     wrap.className = 'msg ' + role;
-
     const bubble = document.createElement('div');
     bubble.className = 'bubble' + (pending ? ' pending' : '');
     bubble.textContent = text;
-
     wrap.appendChild(bubble);
     messagesEl.appendChild(wrap);
     messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -173,7 +234,18 @@
 
   function autoResize() {
     inputEl.style.height = 'auto';
-    inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + 'px';
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 140) + 'px';
+  }
+
+  function buildBody(text) {
+    const body = { message: text };
+    body.temperature = parseFloat(document.getElementById('temperature').value);
+    body.top_p = parseFloat(document.getElementById('top_p').value);
+    const mt = document.getElementById('max_tokens').value;
+    if (mt) body.max_tokens = parseInt(mt, 10);
+    body.frequency_penalty = parseFloat(document.getElementById('frequency_penalty').value);
+    body.presence_penalty = parseFloat(document.getElementById('presence_penalty').value);
+    return body;
   }
 
   async function send() {
@@ -193,7 +265,7 @@
       const res = await fetch('/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify(buildBody(text)),
       });
 
       if (!res.ok) {
@@ -201,11 +273,10 @@
         try {
           const errData = await res.json();
           if (errData.detail) detail = errData.detail;
-        } catch (e) { /* 非 JSON 响应，保留默认提示 */ }
+        } catch (e) {}
         throw new Error(detail);
       }
 
-      // 流式读取响应体，逐块显示
       const reader = res.body.getReader();
       const decoder = new TextDecoder('utf-8');
       let fullText = '';
@@ -219,15 +290,12 @@
         messagesEl.scrollTop = messagesEl.scrollHeight;
       }
 
-      // 冲刷解码器残留的缓冲字节
       fullText += decoder.decode();
       pendingBubble.classList.remove('pending');
       pendingBubble.textContent = fullText || '(空回复)';
     } catch (err) {
       pendingBubble.classList.remove('pending');
-      if (!pendingBubble.textContent) {
-        pendingBubble.textContent = '请求失败：' + err.message;
-      }
+      if (!pendingBubble.textContent) pendingBubble.textContent = '请求失败：' + err.message;
     } finally {
       sendBtn.disabled = false;
       statusEl.textContent = '就绪';
@@ -237,14 +305,9 @@
   }
 
   sendBtn.addEventListener('click', send);
-
   inputEl.addEventListener('input', autoResize);
-
   inputEl.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      send();
-    }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
   });
 </script>
 </body>

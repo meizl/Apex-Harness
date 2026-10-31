@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
@@ -50,6 +51,11 @@ class ChatRequest(BaseModel):
     """客户端发送的聊天请求。"""
 
     message: str
+    temperature: float = 0.7
+    max_tokens: int | None = None
+    top_p: float = 1.0
+    frequency_penalty: float = 0.0
+    presence_penalty: float = 0.0
 
 
 @asynccontextmanager
@@ -87,10 +93,20 @@ async def chat(request: ChatRequest) -> StreamingResponse:
     session.add_user(request.message)
     messages = session.to_llm_format()
 
+    # 组装 LLM 参数，None 值不传
+    params: dict[str, Any] = {
+        "temperature": request.temperature,
+        "top_p": request.top_p,
+        "frequency_penalty": request.frequency_penalty,
+        "presence_penalty": request.presence_penalty,
+    }
+    if request.max_tokens is not None:
+        params["max_tokens"] = request.max_tokens
+
     async def generate():
         parts: list[str] = []
         try:
-            async for chunk in llm.stream(messages):
+            async for chunk in llm.stream(messages, **params):
                 parts.append(chunk)
                 yield chunk
         except Exception as exc:  # noqa: BLE001 - 错误透传给前端
