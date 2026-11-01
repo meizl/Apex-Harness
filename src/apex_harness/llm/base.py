@@ -2,11 +2,26 @@
 
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, ClassVar
 
 from langchain_core.messages import AIMessage, BaseMessage
 
 from apex_harness.core.plugin import Plugin
+
+
+@dataclass
+class StreamChunk:
+    """流式输出的一个增量片段。
+
+    与 OpenAI 的 ``delta`` 对应：``content`` 是增量文本，``tool_calls``
+    是增量工具调用（可能只包含 ``index``、``id``、``function.name``、
+    ``function.arguments`` 的一部分，需要调用方按 ``index`` 合并）。
+    """
+
+    content: str = ""
+    tool_calls: list[dict[str, Any]] | None = field(default=None)
 
 
 class LLMProvider(Plugin):
@@ -50,15 +65,29 @@ class LLMProvider(Plugin):
         *,
         tools: list[dict[str, Any]] | None = None,
         **kwargs: Any,
-    ) -> AsyncIterator[str]:
-        """流式对话：逐个产出文本片段，适合实时展示。
+    ) -> AsyncIterator[StreamChunk]:
+        """流式对话：逐个产出 :class:`StreamChunk`。
 
-        参数与 :meth:`chat` 一致，但返回一个异步迭代器，每次 ``yield``
-        一段增量文本。默认实现回退为一次性 ``chat`` 后整体产出。
+        参数与 :meth:`chat` 一致，但返回异步迭代器。每个 ``StreamChunk``
+        携带增量 ``content`` 和（可选的）增量 ``tool_calls``。
+
+        默认实现回退为一次性 ``chat`` 后整体产出，方便未实现流式的子类。
         """
         reply = await self.chat(messages, tools=tools, **kwargs)
-        if reply.content:
-            yield reply.content
+        tool_calls = None
+        if reply.tool_calls:
+            tool_calls = [
+                {
+                    "index": i,
+                    "id": tc.get("id", ""),
+                    "function": {
+                        "name": tc.get("name", ""),
+                        "arguments": json.dumps(tc.get("args", {}), ensure_ascii=False),
+                    },
+                }
+                for i, tc in enumerate(reply.tool_calls)
+            ]
+        yield StreamChunk(content=reply.content or "", tool_calls=tool_calls)
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         """文本嵌入：传入文本列表，返回等长的向量列表。"""

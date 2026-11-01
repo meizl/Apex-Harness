@@ -24,7 +24,7 @@ from typing import Any, AsyncIterator
 import httpx
 from langchain_core.messages import AIMessage, BaseMessage
 
-from apex_harness.llm.base import LLMProvider
+from apex_harness.llm.base import LLMProvider, StreamChunk
 
 logger = logging.getLogger(__name__)
 
@@ -162,8 +162,11 @@ class OpenAIProvider(LLMProvider):
         *,
         tools: list[dict[str, Any]] | None = None,
         **kwargs: Any,
-    ) -> AsyncIterator[str]:
-        """流式对话：解析 SSE 响应，逐个产出增量文本。"""
+    ) -> AsyncIterator[StreamChunk]:
+        """流式对话：解析 SSE 响应，逐个产出 :class:`StreamChunk`。
+
+        保留 delta 中的 ``tool_calls`` 字段，供调用方检测工具调用并拼装。
+        """
         if not self.api_key:
             raise RuntimeError(
                 "未配置 LLM API Key，请设置环境变量 APEX_LLM_API_KEY 或 OPENAI_API_KEY"
@@ -193,9 +196,11 @@ class OpenAIProvider(LLMProvider):
                 except json.JSONDecodeError:
                     continue
                 delta = data.get("choices", [{}])[0].get("delta", {}) or {}
-                content = delta.get("content")
-                if content:
-                    yield content
+                content = delta.get("content") or ""
+                tool_calls = delta.get("tool_calls")
+                if not content and not tool_calls:
+                    continue
+                yield StreamChunk(content=content, tool_calls=tool_calls)
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         """文本嵌入，本插件不实现。"""

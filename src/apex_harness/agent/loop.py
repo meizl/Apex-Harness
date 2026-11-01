@@ -133,32 +133,75 @@ class AgentLoop:
         return fallback
 
     async def run_stream(self, user_input: str, **kwargs: Any) -> AsyncIterator[str]:
-        """流式执行一次 Agent 交互，逐个产出最终回复文本。
+        """流式执行一次 Agent 交互，逐个产出回复文本。
 
-        与 :meth:`run` 等价，但无工具时使用 :meth:`LLMProvider.stream` 逐块
-        输出，适合前端实时展示。有工具调用时，中间需要执行工具，流式意义
-        不大，故回退到非流式的 :meth:`run` 一次性产出。
+        始终走流式：模型输出的文本逐块 yield；若模型中途发起工具调用，
+        则停止 yield 文本、执行工具、把结果写回历史，再进入下一轮流式
+        调用，直到模型不再调工具，给出最终回复。
         """
-        # 1. 把工具转成 LLM 需要的 schema；无工具时是 None
+        # 1. 写入用户消息
+        self.session.add_user(user_input)
+
         tools_schema = self._tool_schemas() or None
 
-        # 2. 无工具：直接走流式，边生成边 yield 给调用方
-        if tools_schema is None:
-            # 2a. 先把用户消息写进会话历史
-            self.session.add_user(user_input)
-            # 2b. 累积每个文本片段，用于最终写回会话
-            parts: list[str] = []
-            # 2c. 逐块调用 LLM，每拿到一块就立刻 yield 出去（不等待完整回复）
-            async for chunk in self.llm.stream(
-                self.session.to_llm_format(), **kwargs
-            ):
-                parts.append(chunk)
-                yield chunk
-            # 2d. 流式结束后，把完整回复写回会话，供下一轮上下文使用
-            self.session.add_assistant("".join(parts))
-            return
+        # 2. 多步循环
+        for step in range(self.max_steps):
+            messages = self.session.to_llm_format()
 
-        # 3. 有工具：走非流式循环（run 内部会写入用户消息）
-        #    工具调用中间需要执行工具，无法边生成边返回，故一次性产出
-        reply = await self.run(user_input, **kwargs)
-        yield reply
+            # 累积本轮的文本片段和工具调用 delta
+            content_parts: list[str] = []
+            # index -> {id, name, args_str}
+            tc_map: dict[int, dict[str, Any]] = {}
+
+            # 2a. 流式调用 LLM，文本逐块 yield
+            async for chunk in self.llm.stream(messages, tools=tools_schema, **kwargs):
+                if chunk.content:
+                    content_parts.append(chunk.content)
+                    yield chunk.content
+
+                # 2b. 累积工具调用 delta（按 index 合并）
+                for tc in chunk.tool_calls or []:
+                    idx = tc.get("index", 0)
+                    entry = tc_map.setdefault(idx, {"id": "", "name": "", "args_str": ""})
+                    if tc.get("id"):
+                        entry["id"] = tc["id"]
+                    fn = tc.get("function") or {}
+                    if fn.get("name"):
+                        entry["name"] = fn["name"]
+                    if fn.get("arguments"):
+                        entry["args_str"] += fn["arguments"]
+
+            # 2c. 没有工具调用 → 最终回复
+            if not tc_map:
+                self.session.add_assistant("".join(content_parts))
+                return
+
+            # 2d. 有工具调用 → 拼装成 LangChain 格式
+            tool_calls = []
+            for idx in sorted(tc_map.keys()):
+                entry = tc_map[idx]
+                try:
+                    args = json.loads(entry["args_str"] or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                tool_calls.append({
+                    "name": entry["name"],
+                    "args": args,
+                    "id": entry["id"],
+                })
+
+            # 2e. 把 assistant 消息（带 tool_calls）写进历史
+            self.session.add_assistant("".join(content_parts), tool_calls=tool_calls)
+
+            # 2f. 逐个执行工具，把结果写回历史
+            for tool_call in tool_calls:
+                result = await self._execute_tool_call(tool_call)
+                call_id = tool_call.get("id", "")
+                self.session.add_tool(result, tool_call_id=call_id)
+
+            # 2g. 继续循环：LLM 下一轮会看到工具结果
+
+        # 3. 超过最大步数，兜底返回
+        fallback = f"已达到最大步数 {self.max_steps}，未能得到最终回复。"
+        self.session.add_assistant(fallback)
+        yield fallback
