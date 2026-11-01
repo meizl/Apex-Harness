@@ -64,30 +64,7 @@ class Orchestrator:
         self.planner = Planner(llm)
 
     async def _classify(self, user_input: str) -> str:
-        """判断任务复杂度，返回 ``"simple"`` 或 ``"complex"``。
-
-        先用启发式规则快速判断，不确定时再调用 LLM 分类。
-        """
-        # 启发式 1：包含多步骤关键词 → 复杂
-        complex_keywords = [
-            "分析", "总结", "生成", "创建", "实现", "开发",
-            "所有", "全部", "每个", "批量", "依次", "然后",
-            "项目", "架构", "文档", "报告", "脚本", "测试",
-        ]
-        if any(kw in user_input for kw in complex_keywords):
-            return "complex"
-
-        # 启发式 2：包含多个动词（可能是多步）
-        action_words = ["读", "写", "查", "找", "执行", "运行", "分析", "生成", "创建"]
-        action_count = sum(1 for w in action_words if w in user_input)
-        if action_count >= 2:
-            return "complex"
-
-        # 启发式 3：极短输入大概率是简单任务（问候、单步指令）
-        if len(user_input) <= 4:
-            return "simple"
-
-        # 启发式无法判断 → 用 LLM 分类
+        """用 LLM 判断任务复杂度，返回 ``"simple"`` 或 ``"complex"``。"""
         try:
             reply = await self.llm.chat([
                 SystemMessage(content=_CLASSIFY_PROMPT),

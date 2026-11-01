@@ -1,11 +1,11 @@
 """Orchestrator 任务路由的单元测试。
 
 覆盖：
-1. 启发式分类：短输入 → simple
-2. 启发式分类：复杂关键词 → complex
-3. LLM 分类兜底
+1. LLM 分类：simple
+2. LLM 分类：complex
+3. LLM 分类失败兜底为 simple
 4. run_stream 简单任务走 ReAct
-5. run_stream 复杂任务带模式标识
+5. run_stream 复杂任务走 Plan-and-Execute
 """
 
 from __future__ import annotations
@@ -18,6 +18,11 @@ from langchain_core.messages import AIMessage, BaseMessage
 from apex_harness.agent.orchestrator import Orchestrator
 from apex_harness.llm.base import LLMProvider
 from apex_harness.session.session import Session
+
+
+async def _raise_async(*args, **kwargs):
+    """模拟 LLM 调用失败。"""
+    raise RuntimeError("LLM 调用失败")
 
 
 class FakeLLM(LLMProvider):
@@ -82,33 +87,24 @@ def make_orch():
 
 
 class TestClassify:
-    """复杂度分类测试。"""
-
-    @pytest.mark.asyncio
-    async def test_short_input_is_simple(self, make_orch):
-        orch, _ = make_orch()
-        assert await orch._classify("你好") == "simple"
-
-    @pytest.mark.asyncio
-    async def test_complex_keyword_triggers_complex(self, make_orch):
-        orch, _ = make_orch()
-        assert await orch._classify("帮我分析这个项目的架构") == "complex"
-
-    @pytest.mark.asyncio
-    async def test_multiple_actions_trigger_complex(self, make_orch):
-        orch, _ = make_orch()
-        assert await orch._classify("读取文件然后执行脚本") == "complex"
+    """复杂度分类测试（全部走 LLM）。"""
 
     @pytest.mark.asyncio
     async def test_llm_classify_simple(self, make_orch):
         orch, _ = make_orch(classify_reply="simple")
-        # 中等长度、无复杂关键词 → 走 LLM 分类
-        assert await orch._classify("今天天气怎么样适合出门吗") == "simple"
+        assert await orch._classify("你好") == "simple"
 
     @pytest.mark.asyncio
     async def test_llm_classify_complex(self, make_orch):
         orch, _ = make_orch(classify_reply="complex")
-        assert await orch._classify("今天天气怎么样适合出门吗") == "complex"
+        assert await orch._classify("分析这个项目的架构") == "complex"
+
+    @pytest.mark.asyncio
+    async def test_llm_failure_falls_back_to_simple(self, make_orch):
+        orch, _ = make_orch()
+        # 让 LLM 抛异常
+        orch.llm.chat = _raise_async  # type: ignore
+        assert await orch._classify("随便什么") == "simple"
 
 
 class TestRunStream:
