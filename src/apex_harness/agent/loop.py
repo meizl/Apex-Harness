@@ -55,8 +55,10 @@ class AgentLoop:
         self.session = session
         #: LLM 提供者。
         self.llm = llm
-        #: 可用工具，name -> Tool 实例。
-        self.tools: dict[str, Tool] = tools or {}
+        #: 可用工具，统一用 tool.name 作为 key，避免 dict key 与 name 不一致。
+        self.tools: dict[str, Tool] = {
+            t.name: t for t in (tools or {}).values()
+        }
         #: 最大循环步数，防止模型无限调工具。
         self.max_steps = max_steps
 

@@ -29,6 +29,15 @@ from apex_harness.agent.loop import AgentLoop
 from apex_harness.core.kernel import Kernel
 from apex_harness.llm.openai import OpenAIProvider
 from apex_harness.session.session import Session
+from apex_harness.tools.filesystem import (
+    DeleteFileTool,
+    ListDirTool,
+    ReadFileTool,
+    WriteFileTool,
+)
+from apex_harness.tools.registry import ToolRegistryPlugin
+from apex_harness.tools.shell import ShellExecTool
+from apex_harness.tools.web import WebFetchTool
 
 # 项目根目录
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -61,16 +70,37 @@ class ChatRequest(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用生命周期：启动时组装 Kernel + LLM，关闭时清理。"""
+    """应用生命周期：启动时组装 Kernel + LLM + 工具，关闭时清理。"""
     _load_dotenv(PROJECT_ROOT / ".env")
 
-    kernel = Kernel()
-    await kernel.mount_all([OpenAIProvider()])
+    # 工具工作目录：可通过 APEX_WORKSPACE_DIR 指定，默认项目根目录
+    workspace_dir = os.environ.get("APEX_WORKSPACE_DIR", str(PROJECT_ROOT))
+
+    # 工具插件配置：文件系统工具限制在 workspace_dir 内
+    tool_config = {
+        "read_file": {"base_dir": workspace_dir},
+        "write_file": {"base_dir": workspace_dir},
+        "list_dir": {"base_dir": workspace_dir},
+        "delete_file": {"base_dir": workspace_dir},
+    }
+
+    kernel = Kernel(config=tool_config)
+    await kernel.mount_all([
+        OpenAIProvider(),
+        ToolRegistryPlugin(),
+        ReadFileTool(),
+        WriteFileTool(),
+        ListDirTool(),
+        DeleteFileTool(),
+        ShellExecTool(),
+        WebFetchTool(),
+    ])
     await kernel.start()
 
     llm = kernel.services.require("llm")
+    registry = kernel.services.require("tools")
     session = Session()
-    loop = AgentLoop(session, llm)
+    loop = AgentLoop(session, llm, tools=registry.all)
 
     # 挂到 app.state，供路由使用
     app.state.kernel = kernel
