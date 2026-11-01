@@ -167,6 +167,11 @@
   <footer>
     <div class="params" id="params">
       <div class="params-inner">
+        <div class="field" style="grid-column: 1 / -1;">
+          <label>工作目录</label>
+          <input type="text" id="workspace" placeholder="/path/to/workspace" style="flex:1;padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:12px;">
+          <button class="send" id="setWorkspace" style="padding:6px 12px;font-size:12px;border-radius:6px;">设置</button>
+        </div>
         <div class="field">
           <label>温度</label>
           <input type="range" id="temperature" min="0" max="2" step="0.1" value="0.7">
@@ -219,6 +224,46 @@
   });
 
   toggleParamsBtn.addEventListener('click', () => paramsEl.classList.toggle('open'));
+
+  // 工作目录：加载当前值 + 设置
+  const workspaceInput = document.getElementById('workspace');
+  const setWorkspaceBtn = document.getElementById('setWorkspace');
+
+  async function loadWorkspace() {
+    try {
+      const res = await fetch('/api/workspace');
+      const data = await res.json();
+      workspaceInput.value = data.path;
+    } catch (e) {}
+  }
+  loadWorkspace();
+
+  setWorkspaceBtn.addEventListener('click', async () => {
+    const path = workspaceInput.value.trim();
+    if (!path) return;
+    setWorkspaceBtn.disabled = true;
+    setWorkspaceBtn.textContent = '设置中';
+    try {
+      const res = await fetch('/api/workspace', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        workspaceInput.value = data.path;
+        statusEl.textContent = '工作目录已更新';
+        setTimeout(() => { statusEl.textContent = '就绪'; }, 1500);
+      } else {
+        alert('设置失败：' + (data.detail || res.status));
+      }
+    } catch (e) {
+      alert('设置失败：' + e.message);
+    } finally {
+      setWorkspaceBtn.disabled = false;
+      setWorkspaceBtn.textContent = '设置';
+    }
+  });
 
   function addMessage(role, text, pending) {
     const wrap = document.createElement('div');

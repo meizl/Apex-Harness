@@ -65,6 +65,10 @@ class ReadFileTool(Tool):
         registry = self.ctx.require_service("tools")
         registry.register(self)
 
+    def set_base_dir(self, path: str | Path) -> None:
+        """运行时修改工作目录。"""
+        self._base_dir = Path(path).resolve()
+
     async def run(self, path: str, max_bytes: int = 102400, **kwargs: Any) -> str:
         target = _resolve_path(self._base_dir, path)
         if not target.exists():
@@ -113,6 +117,10 @@ class WriteFileTool(Tool):
         registry = self.ctx.require_service("tools")
         registry.register(self)
 
+    def set_base_dir(self, path: str | Path) -> None:
+        """运行时修改工作目录。"""
+        self._base_dir = Path(path).resolve()
+
     async def run(self, path: str, content: str, append: bool = False, **kwargs: Any) -> str:
         target = _resolve_path(self._base_dir, path)
         try:
@@ -147,6 +155,10 @@ class ListDirTool(Tool):
         self._base_dir = Path(cfg["base_dir"]).resolve() if "base_dir" in cfg else None
         registry = self.ctx.require_service("tools")
         registry.register(self)
+
+    def set_base_dir(self, path: str | Path) -> None:
+        """运行时修改工作目录。"""
+        self._base_dir = Path(path).resolve()
 
     async def run(self, path: str = ".", **kwargs: Any) -> str:
         target = _resolve_path(self._base_dir, path)
@@ -187,6 +199,10 @@ class DeleteFileTool(Tool):
         self._base_dir = Path(cfg["base_dir"]).resolve() if "base_dir" in cfg else None
         registry = self.ctx.require_service("tools")
         registry.register(self)
+
+    def set_base_dir(self, path: str | Path) -> None:
+        """运行时修改工作目录。"""
+        self._base_dir = Path(path).resolve()
 
     async def run(self, path: str, **kwargs: Any) -> str:
         target = _resolve_path(self._base_dir, path)

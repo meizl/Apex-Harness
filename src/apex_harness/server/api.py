@@ -105,6 +105,8 @@ async def lifespan(app: FastAPI):
     # 挂到 app.state，供路由使用
     app.state.kernel = kernel
     app.state.loop = loop
+    app.state.registry = registry
+    app.state.workspace_dir = workspace_dir
 
     yield
 
@@ -112,6 +114,39 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Apex Harness", lifespan=lifespan)
+
+
+class WorkspaceRequest(BaseModel):
+    """设置工作目录的请求。"""
+
+    path: str
+
+
+@app.get("/api/workspace")
+async def get_workspace() -> dict[str, str]:
+    """返回当前工具工作目录。"""
+    return {"path": app.state.workspace_dir}
+
+
+@app.post("/api/workspace")
+async def set_workspace(req: WorkspaceRequest) -> dict[str, str]:
+    """设置工具工作目录，所有文件系统工具立即生效。"""
+    from pathlib import Path
+
+    new_dir = Path(req.path).resolve()
+    if not new_dir.exists() or not new_dir.is_dir():
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=400, detail=f"目录不存在或不是目录: {req.path}")
+
+    # 更新所有文件系统工具的 base_dir
+    for tool in app.state.registry.all.values():
+        set_dir = getattr(tool, "set_base_dir", None)
+        if callable(set_dir):
+            set_dir(str(new_dir))
+
+    app.state.workspace_dir = str(new_dir)
+    return {"path": str(new_dir)}
 
 
 @app.post("/chat")
