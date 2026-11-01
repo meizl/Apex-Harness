@@ -25,6 +25,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from apex_harness.agent.loop import AgentLoop
 from apex_harness.core.kernel import Kernel
 from apex_harness.llm.openai import OpenAIProvider
 from apex_harness.session.session import Session
@@ -69,11 +70,11 @@ async def lifespan(app: FastAPI):
 
     llm = kernel.services.require("llm")
     session = Session()
+    loop = AgentLoop(session, llm)
 
     # 挂到 app.state，供路由使用
     app.state.kernel = kernel
-    app.state.llm = llm
-    app.state.session = session
+    app.state.loop = loop
 
     yield
 
@@ -85,13 +86,8 @@ app = FastAPI(title="Apex Harness", lifespan=lifespan)
 
 @app.post("/chat")
 async def chat(request: ChatRequest) -> StreamingResponse:
-    """接收一条用户消息，流式返回助手回复（纯文本增量）。"""
-    session: Session = app.state.session
-    llm = app.state.llm
-
-    # 先把用户消息写入会话，作为本次生成的上下文
-    session.add_user(request.message)
-    messages = session.to_llm_format()
+    """接收一条用户消息，交由 AgentLoop 流式处理并返回回复。"""
+    loop: AgentLoop = app.state.loop
 
     # 组装 LLM 参数，None 值不传
     params: dict[str, Any] = {
@@ -104,16 +100,11 @@ async def chat(request: ChatRequest) -> StreamingResponse:
         params["max_tokens"] = request.max_tokens
 
     async def generate():
-        parts: list[str] = []
         try:
-            async for chunk in llm.stream(messages, **params):
-                parts.append(chunk)
+            async for chunk in loop.run_stream(request.message, **params):
                 yield chunk
         except Exception as exc:  # noqa: BLE001 - 错误透传给前端
             yield f"\n\n[请求出错] {exc}"
-        else:
-            # 仅在成功时把完整回复写回会话，供下一轮上下文使用
-            session.add_assistant("".join(parts))
 
     return StreamingResponse(generate(), media_type="text/plain; charset=utf-8")
 
