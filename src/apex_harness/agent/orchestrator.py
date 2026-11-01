@@ -4,10 +4,8 @@
 1. 判断用户任务的复杂度（简单 / 复杂）
 2. 选择执行模式：
    - 简单任务 → ReAct（AgentLoop，边想边做）
-   - 复杂任务 → Plan-and-Execute（Planner 拆步 + SubAgent 逐步执行，待实现）
+   - 复杂任务 → Plan-and-Execute（Planner 拆步 + Executor 逐步执行）
 3. 调度执行器并流式返回结果
-
-当前复杂任务暂回退到 ReAct（带模式标识），后续接入 Planner/SubAgent。
 """
 
 from __future__ import annotations
@@ -17,6 +15,7 @@ from typing import Any, AsyncIterator
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from apex_harness.agent.loop import AgentLoop
+from apex_harness.agent.planner import Planner
 from apex_harness.llm.base import LLMProvider
 from apex_harness.session.session import Session
 from apex_harness.tools.base import Tool
@@ -59,8 +58,10 @@ class Orchestrator:
     ) -> None:
         self.session = session
         self.llm = llm
-        #: ReAct 执行器（简单任务直接用，复杂任务暂时回退到它）
+        #: ReAct 执行器（简单任务直接用，复杂任务中作为 Executor）
         self.react = AgentLoop(session, llm, tools=tools, max_steps=max_steps)
+        #: 规划 Agent（复杂任务用，独立会话）
+        self.planner = Planner(llm)
 
     async def _classify(self, user_input: str) -> str:
         """判断任务复杂度，返回 ``"simple"`` 或 ``"complex"``。
@@ -105,12 +106,39 @@ class Orchestrator:
         mode = await self._classify(user_input)
 
         if mode == "complex":
-            # 复杂任务：TODO 接入 Planner + SubAgent
-            # 当前先回退到 ReAct，并告知用户模式
-            yield "[复杂任务模式] "
-            async for chunk in self.react.run_stream(user_input, **kwargs):
+            async for chunk in self._run_plan_and_execute(user_input, **kwargs):
                 yield chunk
         else:
             # 简单任务：直接 ReAct
             async for chunk in self.react.run_stream(user_input, **kwargs):
                 yield chunk
+
+    async def _run_plan_and_execute(
+        self, user_input: str, **kwargs: Any
+    ) -> AsyncIterator[str]:
+        """Plan-and-Execute：Planner 拆步 → Executor 逐步执行。"""
+        # 1. 规划
+        yield "🔍 正在分析任务并生成执行计划...\n\n"
+        steps = await self.planner.plan(user_input)
+
+        if not steps:
+            yield "计划生成失败，改为直接执行。\n\n"
+            async for chunk in self.react.run_stream(user_input, **kwargs):
+                yield chunk
+            return
+
+        # 2. 展示计划
+        yield "📋 执行计划：\n"
+        for i, step in enumerate(steps, 1):
+            yield f"  {i}. {step}\n"
+        yield "\n"
+
+        # 3. 逐步执行
+        for i, step in enumerate(steps, 1):
+            yield f"\n▶ 步骤 {i}/{len(steps)}：{step}\n"
+            async for chunk in self.react.run_stream(step, **kwargs):
+                yield chunk
+            yield "\n"
+
+        # 4. 完成
+        yield "\n✅ 所有步骤执行完成。"

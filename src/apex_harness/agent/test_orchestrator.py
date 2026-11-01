@@ -23,10 +23,11 @@ from apex_harness.session.session import Session
 class FakeLLM(LLMProvider):
     """可预设回复的 LLM 替身。"""
 
-    def __init__(self, classify_reply: str = "simple", chat_reply: str = "你好") -> None:
+    def __init__(self, classify_reply: str = "simple", chat_reply: str = "你好", plan_reply: str = '["步骤一", "步骤二"]') -> None:
         super().__init__()
         self.classify_reply = classify_reply
         self.chat_reply = chat_reply
+        self.plan_reply = plan_reply
         self.chat_calls = 0
 
     async def chat(
@@ -37,18 +38,43 @@ class FakeLLM(LLMProvider):
         **kwargs: Any,
     ) -> AIMessage:
         self.chat_calls += 1
-        # 判断是分类请求还是正常对话（分类请求第一条是 SystemMessage）
         from langchain_core.messages import SystemMessage
 
-        if messages and isinstance(messages[0], SystemMessage) and "复杂度分类器" in (messages[0].content or ""):
+        first_content = messages[0].content if messages and isinstance(messages[0], SystemMessage) else ""
+        last_content = messages[-1].content if messages else ""
+
+        # 复杂度分类
+        if "复杂度分类器" in first_content:
             return AIMessage(content=self.classify_reply)
+
+        # Planner 内部调用 create_plan 工具时，工具内部再调 LLM 生成计划
+        if "任务规划助手" in first_content:
+            return AIMessage(content=self.plan_reply)
+
+        # Planner 的 AgentLoop 调用（带 tools）→ 返回 create_plan 工具调用
+        if tools and any(t.get("function", {}).get("name") == "create_plan" for t in tools):
+            # 检查是否已有工具结果（ToolMessage），有则说明已执行过工具，返回最终回复
+            from langchain_core.messages import ToolMessage
+
+            has_tool_result = any(isinstance(m, ToolMessage) for m in messages)
+            if not has_tool_result:
+                return AIMessage(
+                    content="",
+                    tool_calls=[{
+                        "name": "create_plan",
+                        "args": {"task": str(last_content)},
+                        "id": "call_plan_1",
+                    }],
+                )
+            return AIMessage(content="计划已生成。")
+
         return AIMessage(content=self.chat_reply)
 
 
 @pytest.fixture
 def make_orch():
-    def _make(classify_reply: str = "simple", chat_reply: str = "你好"):
-        llm = FakeLLM(classify_reply=classify_reply, chat_reply=chat_reply)
+    def _make(classify_reply: str = "simple", chat_reply: str = "你好", plan_reply: str = '["步骤一", "步骤二"]'):
+        llm = FakeLLM(classify_reply=classify_reply, chat_reply=chat_reply, plan_reply=plan_reply)
         session = Session()
         return Orchestrator(session, llm), llm
 
@@ -99,11 +125,21 @@ class TestRunStream:
         assert "复杂任务模式" not in text
 
     @pytest.mark.asyncio
-    async def test_complex_has_mode_marker(self, make_orch):
-        orch, _ = make_orch(classify_reply="complex", chat_reply="分析完成")
+    async def test_complex_uses_plan_and_execute(self, make_orch):
+        orch, _ = make_orch(
+            classify_reply="complex",
+            chat_reply="执行完成",
+            plan_reply='["读 README", "总结架构"]',
+        )
         chunks = []
         async for chunk in orch.run_stream("分析项目架构"):
             chunks.append(chunk)
         text = "".join(chunks)
-        assert "复杂任务模式" in text
-        assert "分析完成" in text
+        # 规划阶段
+        assert "执行计划" in text
+        assert "读 README" in text
+        assert "总结架构" in text
+        # 执行阶段
+        assert "步骤 1/2" in text
+        assert "执行完成" in text
+        assert "所有步骤执行完成" in text
