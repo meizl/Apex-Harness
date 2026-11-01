@@ -38,12 +38,26 @@ def _to_openai_format(message: BaseMessage) -> dict[str, Any]:
         "tool": "tool",
     }
     role = role_map.get(message.type, "user")
-    result: dict[str, Any] = {"role": role, "content": message.content}
+    # LangChain 的 content 可能是 str 或 list，统一转成 str
+    content = message.content
+    if isinstance(content, list):
+        content = "".join(
+            part.get("text", "") if isinstance(part, dict) else str(part)
+            for part in content
+        )
+    result: dict[str, Any] = {"role": role, "content": content}
 
-    # assistant 消息可能带 tool_calls，需要透传；去掉 LangChain 内部字段
+    # assistant 消息带 tool_calls 时，需要从 LangChain 格式转回 OpenAI 格式
     if message.type == "ai" and getattr(message, "tool_calls", None):
         result["tool_calls"] = [
-            {k: v for k, v in tc.items() if k != "type"}
+            {
+                "id": tc.get("id", ""),
+                "type": "function",
+                "function": {
+                    "name": tc.get("name", ""),
+                    "arguments": json.dumps(tc.get("args", {}), ensure_ascii=False),
+                },
+            }
             for tc in message.tool_calls
         ]
 
