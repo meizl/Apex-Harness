@@ -25,7 +25,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from apex_harness.agent.loop import AgentLoop
+from apex_harness.agent.orchestrator import Orchestrator
 from apex_harness.core.kernel import Kernel
 from apex_harness.llm.openai import OpenAIProvider
 from apex_harness.session.session import Session
@@ -100,11 +100,11 @@ async def lifespan(app: FastAPI):
     llm = kernel.services.require("llm")
     registry = kernel.services.require("tools")
     session = Session()
-    loop = AgentLoop(session, llm, tools=registry.all)
+    orch = Orchestrator(session, llm, tools=registry.all)
 
     # 挂到 app.state，供路由使用
     app.state.kernel = kernel
-    app.state.loop = loop
+    app.state.orchestrator = orch
     app.state.registry = registry
     app.state.workspace_dir = workspace_dir
 
@@ -151,8 +151,8 @@ async def set_workspace(req: WorkspaceRequest) -> dict[str, str]:
 
 @app.post("/chat")
 async def chat(request: ChatRequest) -> StreamingResponse:
-    """接收一条用户消息，交由 AgentLoop 流式处理并返回回复。"""
-    loop: AgentLoop = app.state.loop
+    """接收一条用户消息，交由 Orchestrator 路由并流式处理返回回复。"""
+    orch: Orchestrator = app.state.orchestrator
 
     # 组装 LLM 参数，None 值不传
     params: dict[str, Any] = {
@@ -166,7 +166,7 @@ async def chat(request: ChatRequest) -> StreamingResponse:
 
     async def generate():
         try:
-            async for chunk in loop.run_stream(request.message, **params):
+            async for chunk in orch.run_stream(request.message, **params):
                 yield chunk
         except Exception as exc:  # noqa: BLE001 - 错误透传给前端
             yield f"\n\n[请求出错] {exc}"
