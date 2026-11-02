@@ -15,7 +15,8 @@ import pytest
 from langchain_core.messages import AIMessage, BaseMessage
 
 from apex_harness.agent.loop import AgentLoop
-from apex_harness.llm.base import LLMProvider
+from apex_harness.core.errors import LLMError, LLMRateLimitError, LLMTimeoutError
+from apex_harness.llm.base import LLMProvider, StreamChunk
 from apex_harness.session.session import Session
 from apex_harness.tools.base import Tool
 
@@ -141,3 +142,91 @@ async def test_max_steps_exceeded(session: Session) -> None:
     # 每个 step 产生 ai(tool_calls) + tool，最后还有一个 ai(fallback)
     # 即 human + 3*(ai, tool) + ai(fallback) = 8 条
     assert len(session.history()) == 1 + 3 * 2 + 1
+
+
+# -- LLM 异常处理测试 ------------------------------------------------------
+
+
+class FailingLLM(LLMProvider):
+    """chat / stream 都抛出指定异常的 LLM 替身。"""
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__()
+        self._error = error
+
+    async def chat(self, messages, *, tools=None, **kwargs):
+        raise self._error
+
+    async def stream(self, messages, *, tools=None, **kwargs):
+        raise self._error
+        yield  # pragma: no cover  # 让函数成为生成器
+
+
+async def test_run_catches_llm_error(session: Session) -> None:
+    """run() 中 LLM 抛异常时，返回友好错误信息并写入会话，不向上抛。"""
+    llm = FailingLLM(LLMTimeoutError("请求超时"))
+    loop = AgentLoop(session, llm)
+
+    reply = await loop.run("你好")
+
+    assert "超时" in reply
+    assert "请求超时" in reply
+    # 会话里应该有 assistant 的错误消息
+    roles = [m.type for m in session.history()]
+    assert roles == ["human", "ai"]
+
+
+async def test_run_catches_rate_limit(session: Session) -> None:
+    """限流异常给出限流相关的提示。"""
+    llm = FailingLLM(LLMRateLimitError("触发限流"))
+    loop = AgentLoop(session, llm)
+
+    reply = await loop.run("你好")
+
+    assert "限流" in reply
+    assert "稍后重试" in reply
+
+
+async def test_run_catches_auth_error(session: Session) -> None:
+    """认证异常提示检查 API Key。"""
+    from apex_harness.core.errors import LLMAuthenticationError
+
+    llm = FailingLLM(LLMAuthenticationError("Key 无效"))
+    loop = AgentLoop(session, llm)
+
+    reply = await loop.run("你好")
+
+    assert "认证" in reply
+    assert "API Key" in reply
+
+
+async def test_run_stream_catches_llm_error(session: Session) -> None:
+    """run_stream() 中 LLM 抛异常时，yield 错误信息并结束，不向上抛。"""
+    llm = FailingLLM(LLMTimeoutError("流式请求超时"))
+    loop = AgentLoop(session, llm)
+
+    chunks = []
+    async for chunk in loop.run_stream("你好"):
+        chunks.append(chunk)
+    text = "".join(chunks)
+
+    assert "超时" in text
+    assert "流式请求超时" in text
+
+
+async def test_run_stream_non_llm_error_propagates(session: Session) -> None:
+    """非 LLMError 的异常（如编程错误）应继续向上抛，不被吞掉。"""
+
+    class BuggyLLM(LLMProvider):
+        async def chat(self, messages, *, tools=None, **kwargs):
+            raise ValueError("内部 bug")
+
+        async def stream(self, messages, *, tools=None, **kwargs):
+            raise ValueError("内部 bug")
+            yield  # pragma: no cover
+
+    llm = BuggyLLM()
+    loop = AgentLoop(session, llm)
+
+    with pytest.raises(ValueError, match="内部 bug"):
+        await loop.run("你好")

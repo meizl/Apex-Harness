@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -203,6 +204,10 @@ class OpenAIProvider(LLMProvider):
         """流式对话：解析 SSE 响应，逐个产出 :class:`StreamChunk`。
 
         保留 delta 中的 ``tool_calls`` 字段，供调用方检测工具调用并拼装。
+
+        重试策略：仅在尚未产出任何 chunk 时重试可重试异常
+        （限流/服务端错误/超时）；一旦已经 yield 过内容，后续错误直接抛出，
+        避免重复输出。
         """
         if not self.api_key:
             raise LLMAuthenticationError(
@@ -218,6 +223,43 @@ class OpenAIProvider(LLMProvider):
             payload["tools"] = tools
         payload.update(kwargs)
 
+        # 流式重试：最多重试 3 次，指数退避；仅在未产出 chunk 时重试。
+        max_retries = 3
+        base_delay = 1.0
+        last_exc: Exception | None = None
+
+        for attempt in range(max_retries + 1):
+            yielded_any = False
+            try:
+                async for chunk in self._stream_once(payload):
+                    yielded_any = True
+                    yield chunk
+                return  # 正常结束
+            except (LLMRateLimitError, LLMServiceError, LLMTimeoutError) as exc:
+                last_exc = exc
+                # 已经产出过内容 → 不能重试，直接抛出
+                if yielded_any:
+                    raise
+                # 未产出内容且还有重试次数 → 退避后重试
+                if attempt < max_retries:
+                    delay = min(base_delay * (2 ** attempt), 30.0)
+                    logger.warning(
+                        "LLM 流式调用失败（第 %d/%d 次）：%s，%.1fs 后重试",
+                        attempt + 1, max_retries + 1, exc, delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                # 重试次数用完
+                raise
+            except (LLMAuthenticationError, LLMError) as exc:
+                # 认证错误、其他网络错误不重试
+                raise
+
+        if last_exc:  # pragma: no cover
+            raise last_exc
+
+    async def _stream_once(self, payload: dict[str, Any]) -> AsyncIterator[StreamChunk]:
+        """单次流式请求：建立连接、解析 SSE、逐个 yield chunk。"""
         try:
             async with self._client.stream(
                 "POST", "/chat/completions", json=payload

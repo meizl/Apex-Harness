@@ -11,6 +11,7 @@ from typing import Any, AsyncIterator
 
 from langchain_core.messages import AIMessage
 
+from apex_harness.core.errors import LLMError, friendly_llm_error
 from apex_harness.llm.base import LLMProvider
 from apex_harness.session.session import Session
 from apex_harness.tools.base import Tool
@@ -97,7 +98,10 @@ class AgentLoop:
     # -- 主循环 -----------------------------------------------------------
 
     async def run(self, user_input: str, **kwargs: Any) -> str:
-        """执行一次完整的 Agent 交互，返回最终回复文本。"""
+        """执行一次完整的 Agent 交互，返回最终回复文本。
+
+        LLM 调用失败时返回友好的错误提示并写入会话，不抛出异常。
+        """
         # 1. 写入用户消息
         self.session.add_user(user_input)
 
@@ -107,9 +111,14 @@ class AgentLoop:
         for step in range(self.max_steps):
             # 2a. 调 LLM
             messages = self.session.to_llm_format()
-            response: AIMessage = await self.llm.chat(
-                messages, tools=tools_schema, **kwargs
-            )
+            try:
+                response: AIMessage = await self.llm.chat(
+                    messages, tools=tools_schema, **kwargs
+                )
+            except LLMError as exc:
+                error_msg = friendly_llm_error(exc)
+                self.session.add_assistant(error_msg)
+                return error_msg
 
             tool_calls = response.tool_calls
 
@@ -156,22 +165,28 @@ class AgentLoop:
             tc_map: dict[int, dict[str, Any]] = {}
 
             # 2a. 流式调用 LLM，文本逐块 yield
-            async for chunk in self.llm.stream(messages, tools=tools_schema, **kwargs):
-                if chunk.content:
-                    content_parts.append(chunk.content)
-                    yield chunk.content
+            try:
+                async for chunk in self.llm.stream(messages, tools=tools_schema, **kwargs):
+                    if chunk.content:
+                        content_parts.append(chunk.content)
+                        yield chunk.content
 
-                # 2b. 累积工具调用 delta（按 index 合并）
-                for tc in chunk.tool_calls or []:
-                    idx = tc.get("index", 0)
-                    entry = tc_map.setdefault(idx, {"id": "", "name": "", "args_str": ""})
-                    if tc.get("id"):
-                        entry["id"] = tc["id"]
-                    fn = tc.get("function") or {}
-                    if fn.get("name"):
-                        entry["name"] = fn["name"]
-                    if fn.get("arguments"):
-                        entry["args_str"] += fn["arguments"]
+                    # 2b. 累积工具调用 delta（按 index 合并）
+                    for tc in chunk.tool_calls or []:
+                        idx = tc.get("index", 0)
+                        entry = tc_map.setdefault(idx, {"id": "", "name": "", "args_str": ""})
+                        if tc.get("id"):
+                            entry["id"] = tc["id"]
+                        fn = tc.get("function") or {}
+                        if fn.get("name"):
+                            entry["name"] = fn["name"]
+                        if fn.get("arguments"):
+                            entry["args_str"] += fn["arguments"]
+            except LLMError as exc:
+                error_msg = f"\n\n{friendly_llm_error(exc)}"
+                self.session.add_assistant("".join(content_parts) + error_msg)
+                yield error_msg
+                return
 
             # 2c. 没有工具调用 → 最终回复
             if not tc_map:

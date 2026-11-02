@@ -86,6 +86,22 @@ def raise_for_llm_status(status_code: int, detail: str = "") -> None:
     raise LLMError(f"LLM 请求失败（{status_code}）{suffix}")
 
 
+def friendly_llm_error(exc: LLMError) -> str:
+    """把 LLM 异常转成面向用户的友好提示。
+
+    不同异常类型给出不同的建议，而不是统一的"调用失败"。
+    """
+    if isinstance(exc, LLMAuthenticationError):
+        return f"模型认证失败：API Key 无效或无权限。请检查 APEX_LLM_API_KEY 配置。（{exc}）"
+    if isinstance(exc, LLMRateLimitError):
+        return f"模型请求过于频繁，触发了限流。请稍后重试。（{exc}）"
+    if isinstance(exc, LLMTimeoutError):
+        return f"模型响应超时。请检查网络或稍后重试。（{exc}）"
+    if isinstance(exc, LLMServiceError):
+        return f"模型服务暂时不可用。请稍后重试。（{exc}）"
+    return f"模型调用失败：{exc}"
+
+
 def retry(
     retries: int = 3,
     base_delay: float = 1.0,

@@ -138,4 +138,4 @@ class TestRunStream:
         # 执行阶段
         assert "步骤 1/2" in text
         assert "执行完成" in text
-        assert "所有步骤执行完成" in text
+        assert "完成 2 步" in text
