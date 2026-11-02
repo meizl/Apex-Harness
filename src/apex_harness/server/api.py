@@ -100,6 +100,15 @@ async def lifespan(app: FastAPI):
     llm = kernel.services.require("llm")
     registry = kernel.services.require("tools")
     session = Session()
+
+    # 加载 Apex.md（项目级全局指令，类似 Claude Code 的 CLAUDE.md）
+    # 作为第一条系统消息注入，每次 LLM 调用都会带上
+    apex_md_path = Path(workspace_dir) / "Apex.md"
+    apex_md = ""
+    if apex_md_path.exists():
+        apex_md = apex_md_path.read_text(encoding="utf-8")
+        session.add_system(apex_md)
+
     orch = Orchestrator(session, llm, tools=registry.all)
 
     # 挂到 app.state，供路由使用
@@ -107,6 +116,7 @@ async def lifespan(app: FastAPI):
     app.state.orchestrator = orch
     app.state.registry = registry
     app.state.workspace_dir = workspace_dir
+    app.state.apex_md = apex_md
 
     yield
 
@@ -130,9 +140,7 @@ async def get_workspace() -> dict[str, str]:
 
 @app.post("/api/workspace")
 async def set_workspace(req: WorkspaceRequest) -> dict[str, str]:
-    """设置工具工作目录，所有文件系统工具立即生效。"""
-    from pathlib import Path
-
+    """设置工作目录：更新工具 base_dir，重新加载 Apex.md 并重建会话。"""
     new_dir = Path(req.path).resolve()
     if not new_dir.exists() or not new_dir.is_dir():
         from fastapi import HTTPException
@@ -145,8 +153,28 @@ async def set_workspace(req: WorkspaceRequest) -> dict[str, str]:
         if callable(set_dir):
             set_dir(str(new_dir))
 
+    # 重新加载 Apex.md 并重建会话（项目说明变了，相当于新会话）
+    apex_md_path = new_dir / "Apex.md"
+    apex_md = ""
+    if apex_md_path.exists():
+        apex_md = apex_md_path.read_text(encoding="utf-8")
+
+    llm = app.state.kernel.services.require("llm")
+    registry = app.state.kernel.services.require("tools")
+    session = Session()
+    if apex_md:
+        session.add_system(apex_md)
+
     app.state.workspace_dir = str(new_dir)
+    app.state.apex_md = apex_md
+    app.state.orchestrator = Orchestrator(session, llm, tools=registry.all)
     return {"path": str(new_dir)}
+
+
+@app.get("/api/apex-md")
+async def get_apex_md() -> dict[str, str]:
+    """返回当前加载的 Apex.md 内容。"""
+    return {"content": app.state.apex_md}
 
 
 @app.post("/chat")
