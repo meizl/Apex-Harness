@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from enum import Enum
 from typing import Any, AsyncIterator
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -38,6 +40,24 @@ _CLASSIFY_PROMPT = """你是一个任务复杂度分类器。判断用户的请�
 只回答一个词：simple 或 complex。不要解释。"""
 
 
+class StepStatus(str, Enum):
+    """计划步骤的执行状态。"""
+
+    PENDING = "pending"    # 未开始
+    RUNNING = "running"    # 执行中
+    DONE = "done"          # 执行成功
+    FAILED = "failed"      # 执行失败
+
+
+@dataclass
+class PlanStep:
+    """计划中的一个步骤及其执行状态。"""
+
+    description: str
+    status: StepStatus = StepStatus.PENDING
+    error: str = ""
+
+
 class Orchestrator:
     """Agent 系统的总入口，负责任务路由和模式调度。
 
@@ -62,6 +82,8 @@ class Orchestrator:
         self.react = AgentLoop(session, llm, tools=tools, max_steps=max_steps)
         #: 规划 Agent（复杂任务用，独立会话）
         self.planner = Planner(llm)
+        #: 当前计划及每个步骤的执行状态（复杂任务时填充，供进度查询）。
+        self.plan: list[PlanStep] = []
 
     async def _classify(self, user_input: str) -> str:
         """用 LLM 判断任务复杂度，返回 ``"simple"`` 或 ``"complex"``。"""
@@ -93,7 +115,11 @@ class Orchestrator:
     async def _run_plan_and_execute(
         self, user_input: str, **kwargs: Any
     ) -> AsyncIterator[str]:
-        """Plan-and-Execute：Planner 拆步 → Executor 逐步执行。"""
+        """Plan-and-Execute：Planner 拆步 → Executor 逐步执行。
+
+        执行过程中实时更新每个步骤的状态（pending → running → done/failed），
+        单步失败不中断，继续执行后续步骤。
+        """
         # 1. 规划
         yield "🔍 正在分析任务并生成执行计划...\n\n"
         steps = await self.planner.plan(user_input)
@@ -104,18 +130,42 @@ class Orchestrator:
                 yield chunk
             return
 
+        # 初始化步骤状态（全部 pending）
+        self.plan = [PlanStep(description=s) for s in steps]
+
         # 2. 展示计划
         yield "📋 执行计划：\n"
         for i, step in enumerate(steps, 1):
             yield f"  {i}. {step}\n"
         yield "\n"
 
-        # 3. 逐步执行
+        # 3. 逐步执行，实时更新状态
         for i, step in enumerate(steps, 1):
-            yield f"\n▶ 步骤 {i}/{len(steps)}：{step}\n"
-            async for chunk in self.react.run_stream(step, **kwargs):
-                yield chunk
-            yield "\n"
+            plan_step = self.plan[i - 1]
+            plan_step.status = StepStatus.RUNNING
+            yield f"\n⏳ 步骤 {i}/{len(steps)}：{step}\n"
+            try:
+                async for chunk in self.react.run_stream(step, **kwargs):
+                    yield chunk
+                plan_step.status = StepStatus.DONE
+                yield f"\n✅ 步骤 {i}/{len(steps)} 完成\n"
+            except Exception as exc:  # noqa: BLE001 - 单步失败不中断整体
+                plan_step.status = StepStatus.FAILED
+                plan_step.error = str(exc)
+                yield f"\n❌ 步骤 {i}/{len(steps)} 失败：{exc}\n"
 
-        # 4. 完成
-        yield "\n✅ 所有步骤执行完成。"
+        # 4. 汇总结果
+        done = sum(1 for s in self.plan if s.status is StepStatus.DONE)
+        failed = sum(1 for s in self.plan if s.status is StepStatus.FAILED)
+        yield f"\n✅ 完成 {done} 步，失败 {failed} 步。"
+
+    def plan_status(self) -> list[dict[str, Any]]:
+        """返回当前计划的步骤状态（供前端/API 查询进度）。"""
+        return [
+            {
+                "description": s.description,
+                "status": s.status.value,
+                "error": s.error,
+            }
+            for s in self.plan
+        ]
