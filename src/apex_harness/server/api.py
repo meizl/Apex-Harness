@@ -101,7 +101,6 @@ async def lifespan(app: FastAPI):
     registry = kernel.services.require("tools")
     session = Session()
 
-    # 加载 Apex.md（项目级全局指令，类似 Claude Code 的 CLAUDE.md）
     # 作为第一条系统消息注入，每次 LLM 调用都会带上
     apex_md_path = Path(workspace_dir) / "Apex.md"
     apex_md = ""
