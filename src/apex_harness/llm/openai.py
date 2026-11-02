@@ -24,6 +24,13 @@ from typing import Any, AsyncIterator
 import httpx
 from langchain_core.messages import AIMessage, BaseMessage
 
+from apex_harness.core.errors import (
+    LLMAuthenticationError,
+    LLMError,
+    LLMTimeoutError,
+    raise_for_llm_status,
+    retry,
+)
 from apex_harness.llm.base import LLMProvider, StreamChunk
 
 logger = logging.getLogger(__name__)
@@ -149,7 +156,7 @@ class OpenAIProvider(LLMProvider):
     ) -> AIMessage:
         """LangChain 消息列表 → OpenAI dict → 调接口 → AIMessage。"""
         if not self.api_key:
-            raise RuntimeError(
+            raise LLMAuthenticationError(
                 "未配置 LLM API Key，请设置环境变量 APEX_LLM_API_KEY 或 OPENAI_API_KEY"
             )
 
@@ -161,14 +168,30 @@ class OpenAIProvider(LLMProvider):
             payload["tools"] = tools
         payload.update(kwargs)
 
-        response = await self._client.post("/chat/completions", json=payload)
-        response.raise_for_status()
-        data = response.json()
+        data = await self._post_json(payload)
 
         choice = data["choices"][0]["message"]
         content = choice.get("content") or ""
         tool_calls = _parse_tool_calls(choice.get("tool_calls"))
         return AIMessage(content=content, tool_calls=tool_calls)
+
+    @retry(retries=3)
+    async def _post_json(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """发送 JSON 请求并做错误映射 + 重试。
+
+        限流（429）、服务端错误（5xx）、超时会指数退避重试；认证错误等
+        不可重试的异常直接抛出。
+        """
+        try:
+            response = await self._client.post("/chat/completions", json=payload)
+        except httpx.TimeoutException as exc:
+            raise LLMTimeoutError("LLM 请求超时") from exc
+        except httpx.HTTPError as exc:
+            raise LLMError(f"LLM 网络请求失败：{exc}") from exc
+
+        if response.status_code >= 400:
+            raise_for_llm_status(response.status_code, response.text[:200])
+        return response.json()
 
     async def stream(
         self,
@@ -182,7 +205,7 @@ class OpenAIProvider(LLMProvider):
         保留 delta 中的 ``tool_calls`` 字段，供调用方检测工具调用并拼装。
         """
         if not self.api_key:
-            raise RuntimeError(
+            raise LLMAuthenticationError(
                 "未配置 LLM API Key，请设置环境变量 APEX_LLM_API_KEY 或 OPENAI_API_KEY"
             )
 
@@ -195,26 +218,36 @@ class OpenAIProvider(LLMProvider):
             payload["tools"] = tools
         payload.update(kwargs)
 
-        async with self._client.stream(
-            "POST", "/chat/completions", json=payload
-        ) as response:
-            response.raise_for_status()
-            async for line in response.aiter_lines():
-                if not line or not line.startswith("data:"):
-                    continue
-                data_str = line[len("data:"):].strip()
-                if data_str == "[DONE]":
-                    break
-                try:
-                    data = json.loads(data_str)
-                except json.JSONDecodeError:
-                    continue
-                delta = data.get("choices", [{}])[0].get("delta", {}) or {}
-                content = delta.get("content") or ""
-                tool_calls = delta.get("tool_calls")
-                if not content and not tool_calls:
-                    continue
-                yield StreamChunk(content=content, tool_calls=tool_calls)
+        try:
+            async with self._client.stream(
+                "POST", "/chat/completions", json=payload
+            ) as response:
+                # 非 2xx：读错误体后映射成统一异常（限流/认证/服务错误）。
+                if response.status_code >= 400:
+                    body = await response.aread()
+                    raise_for_llm_status(
+                        response.status_code, body.decode("utf-8", "ignore")[:200]
+                    )
+                async for line in response.aiter_lines():
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data_str = line[len("data:"):].strip()
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
+                    delta = data.get("choices", [{}])[0].get("delta", {}) or {}
+                    content = delta.get("content") or ""
+                    tool_calls = delta.get("tool_calls")
+                    if not content and not tool_calls:
+                        continue
+                    yield StreamChunk(content=content, tool_calls=tool_calls)
+        except httpx.TimeoutException as exc:
+            raise LLMTimeoutError("LLM 流式请求超时") from exc
+        except httpx.HTTPError as exc:
+            raise LLMError(f"LLM 网络请求失败：{exc}") from exc
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         """文本嵌入，本插件不实现。"""
