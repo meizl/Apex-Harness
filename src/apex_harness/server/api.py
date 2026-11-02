@@ -9,18 +9,21 @@
 2. 环境变量 ``APEX_LLM_API_KEY`` / ``APEX_LLM_BASE_URL`` / ``APEX_LLM_MODEL``
 
 接口：
-- ``GET  /``          返回前端聊天页面
-- ``POST /chat``      发送一条消息，以流式（text/plain）返回助手回复
+- ``GET  /``                返回前端聊天页面
+- ``POST /chat``            提交消息，返回 ``task_id``（后台生成，与连接解耦）
+- ``GET  /events/{task_id}`` 以 SSE 流式返回事件，支持 ``Last-Event-ID`` 断线补发
 """
 
 from __future__ import annotations
 
+import json
 import os
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -28,7 +31,9 @@ from pydantic import BaseModel
 from apex_harness.agent.orchestrator import Orchestrator
 from apex_harness.core.kernel import Kernel
 from apex_harness.llm.openai import OpenAIProvider
+from apex_harness.server.tasks import TaskManager
 from apex_harness.session.session import Session
+from apex_harness.storage.local import LocalEventStore
 from apex_harness.tools.filesystem import (
     DeleteFileTool,
     ListDirTool,
@@ -110,12 +115,17 @@ async def lifespan(app: FastAPI):
 
     orch = Orchestrator(session, llm, tools=registry.all)
 
+    # 事件持久化 + 后台任务管理：生成与 HTTP 连接解耦，支持断线补发。
+    store = LocalEventStore(PROJECT_ROOT / ".events")
+    tasks = TaskManager(store)
+
     # 挂到 app.state，供路由使用
     app.state.kernel = kernel
     app.state.orchestrator = orch
     app.state.registry = registry
     app.state.workspace_dir = workspace_dir
     app.state.apex_md = apex_md
+    app.state.tasks = tasks
 
     yield
 
@@ -177,9 +187,15 @@ async def get_apex_md() -> dict[str, str]:
 
 
 @app.post("/chat")
-async def chat(request: ChatRequest) -> StreamingResponse:
-    """接收一条用户消息，交由 Orchestrator 路由并流式处理返回回复。"""
+async def chat(request: ChatRequest) -> dict[str, str]:
+    """接收一条用户消息，启动后台生成任务并返回 ``task_id``。
+
+    生成过程在后台运行，与本次 HTTP 连接解耦：即使前端断线，后端也会继续
+    生成并把事件持久化，前端可用 ``task_id`` 通过 ``/events/{task_id}``
+    重连补发。
+    """
     orch: Orchestrator = app.state.orchestrator
+    tasks: TaskManager = app.state.tasks
 
     # 组装 LLM 参数，None 值不传
     params: dict[str, Any] = {
@@ -191,14 +207,33 @@ async def chat(request: ChatRequest) -> StreamingResponse:
     if request.max_tokens is not None:
         params["max_tokens"] = request.max_tokens
 
-    async def generate():
-        try:
-            async for chunk in orch.run_stream(request.message, **params):
-                yield chunk
-        except Exception as exc:  # noqa: BLE001 - 错误透传给前端
-            yield f"\n\n[请求出错] {exc}"
+    task_id = uuid.uuid4().hex
+    gen = orch.run_stream_events(request.message, **params)
+    tasks.start(task_id, gen)
+    return {"task_id": task_id}
 
-    return StreamingResponse(generate(), media_type="text/plain; charset=utf-8")
+
+@app.get("/events/{task_id}")
+async def events(task_id: str, request: Request) -> StreamingResponse:
+    """以 SSE 返回某任务的事件流，支持 ``Last-Event-ID`` 断线补发。
+
+    事件格式为：``id: <event_id>`` + ``data: <json>``。客户端（EventSource）
+    断线重连时会带上 ``Last-Event-ID``，后端据此补发遗漏事件。
+    """
+    tasks: TaskManager = app.state.tasks
+    # EventSource 通过 Last-Event-ID 头携带已收到的最新 event_id。
+    raw_last = request.headers.get("last-event-id", "0") or "0"
+    try:
+        after_id = int(raw_last)
+    except ValueError:
+        after_id = 0
+
+    async def generate():
+        async for entry in tasks.subscribe(task_id, after_id):
+            yield f"id: {entry['id']}\n"
+            yield f"data: {json.dumps(entry, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 # 前端页面挂在根路径；必须在路由定义之后 mount，避免覆盖 /chat

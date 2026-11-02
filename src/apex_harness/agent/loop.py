@@ -11,6 +11,7 @@ from typing import Any, AsyncIterator
 
 from langchain_core.messages import AIMessage
 
+from apex_harness.agent.events import StreamEvent, new_generation_id
 from apex_harness.core.errors import LLMError, friendly_llm_error
 from apex_harness.llm.base import LLMProvider
 from apex_harness.session.session import Session
@@ -62,6 +63,8 @@ class AgentLoop:
         }
         #: 最大循环步数，防止模型无限调工具。
         self.max_steps = max_steps
+        #: 已执行工具结果的缓存，key 为 tool_call_id，避免重试/重入时重复执行。
+        self._tool_results: dict[str, str] = {}
 
     # -- 工具 schema ------------------------------------------------------
 
@@ -78,22 +81,32 @@ class AgentLoop:
         ``{"name": ..., "args": {...}, "id": ...}``，其中 ``args`` 已经是
         解析好的 dict。
 
-        任何异常都被捕获并转成字符串返回，保证循环不中断——模型看到错误信息
-        后可以自行纠正。
+        以 ``tool_call_id`` 为幂等键缓存结果：同一调用重复进入时直接返回
+        缓存，避免工具被重复执行。任何异常都被捕获并转成字符串返回，保证
+        循环不中断——模型看到错误信息后可以自行纠正。
         """
         name = tool_call.get("name", "")
         args = tool_call.get("args", {}) or {}
+        call_id = tool_call.get("id", "")
+
+        # 幂等：已执行过的调用直接复用结果，不重复执行。
+        if call_id and call_id in self._tool_results:
+            return self._tool_results[call_id]
 
         tool = self.tools.get(name)
         if tool is None:
-            return f"Error: 未知工具 '{name}'"
+            result = f"Error: 未知工具 '{name}'"
+        else:
+            try:
+                result = await tool.run(**args)
+                # 结果可能不是字符串，统一转成文本。
+                result = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+            except Exception as exc:  # noqa: BLE001 - 故意捕获所有异常
+                result = f"Error: 执行工具 '{name}' 时出错: {exc}"
 
-        try:
-            result = await tool.run(**args)
-            # 结果可能不是字符串，统一转成文本。
-            return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
-        except Exception as exc:  # noqa: BLE001 - 故意捕获所有异常
-            return f"Error: 执行工具 '{name}' 时出错: {exc}"
+        if call_id:
+            self._tool_results[call_id] = result
+        return result
 
     # -- 主循环 -----------------------------------------------------------
 
@@ -146,9 +159,19 @@ class AgentLoop:
     async def run_stream(self, user_input: str, **kwargs: Any) -> AsyncIterator[str]:
         """流式执行一次 Agent 交互，逐个产出回复文本。
 
-        始终走流式：模型输出的文本逐块 yield；若模型中途发起工具调用，
-        则停止 yield 文本、执行工具、把结果写回历史，再进入下一轮流式
-        调用，直到模型不再调工具，给出最终回复。
+        这是 :meth:`run_stream_events` 的文本封装：只产出 ``text`` / ``error``
+        事件里的文本内容，供只关心纯文本的调用方使用。
+        """
+        async for ev in self.run_stream_events(user_input, **kwargs):
+            if ev.type in ("text", "error") and ev.text:
+                yield ev.text
+
+    async def run_stream_events(self, user_input: str, **kwargs: Any) -> AsyncIterator[StreamEvent]:
+        """流式执行一次 Agent 交互，产出结构化 :class:`StreamEvent`。
+
+        与 :meth:`run_stream` 的流程一致，但每轮模型生成都用独立的
+        ``generation_id`` 标识，并把文本增量、工具调用、工具结果等以事件
+        形式产出，供上层做持久化、断线补发与回放。
         """
         # 1. 写入用户消息
         self.session.add_user(user_input)
@@ -158,18 +181,21 @@ class AgentLoop:
         # 2. 多步循环
         for step in range(self.max_steps):
             messages = self.session.to_llm_format()
+            generation_id = new_generation_id()
 
             # 累积本轮的文本片段和工具调用 delta
             content_parts: list[str] = []
             # index -> {id, name, args_str}
             tc_map: dict[int, dict[str, Any]] = {}
 
-            # 2a. 流式调用 LLM，文本逐块 yield
+            yield StreamEvent(type="generation_start", generation_id=generation_id)
+
+            # 2a. 流式调用 LLM，文本逐块产出事件
             try:
                 async for chunk in self.llm.stream(messages, tools=tools_schema, **kwargs):
                     if chunk.content:
                         content_parts.append(chunk.content)
-                        yield chunk.content
+                        yield StreamEvent(type="text", generation_id=generation_id, text=chunk.content)
 
                     # 2b. 累积工具调用 delta（按 index 合并）
                     for tc in chunk.tool_calls or []:
@@ -185,12 +211,14 @@ class AgentLoop:
             except LLMError as exc:
                 error_msg = f"\n\n{friendly_llm_error(exc)}"
                 self.session.add_assistant("".join(content_parts) + error_msg)
-                yield error_msg
+                yield StreamEvent(type="error", generation_id=generation_id, text=error_msg)
                 return
 
             # 2c. 没有工具调用 → 最终回复
             if not tc_map:
                 self.session.add_assistant("".join(content_parts))
+                yield StreamEvent(type="generation_end", generation_id=generation_id)
+                yield StreamEvent(type="done", generation_id=generation_id)
                 return
 
             # 2d. 有工具调用 → 拼装成 LangChain 格式
@@ -209,16 +237,32 @@ class AgentLoop:
 
             # 2e. 把 assistant 消息（带 tool_calls）写进历史
             self.session.add_assistant("".join(content_parts), tool_calls=tool_calls)
+            yield StreamEvent(type="generation_end", generation_id=generation_id)
 
             # 2f. 逐个执行工具，把结果写回历史
             for tool_call in tool_calls:
+                yield StreamEvent(
+                    type="tool_call",
+                    generation_id=generation_id,
+                    data={
+                        "name": tool_call["name"],
+                        "args": tool_call["args"],
+                        "id": tool_call["id"],
+                    },
+                )
                 result = await self._execute_tool_call(tool_call)
                 call_id = tool_call.get("id", "")
                 self.session.add_tool(result, tool_call_id=call_id)
+                yield StreamEvent(
+                    type="tool_result",
+                    generation_id=generation_id,
+                    data={"id": call_id, "result": result},
+                )
 
             # 2g. 继续循环：LLM 下一轮会看到工具结果
 
         # 3. 超过最大步数，兜底返回
         fallback = f"已达到最大步数 {self.max_steps}，未能得到最终回复。"
         self.session.add_assistant(fallback)
-        yield fallback
+        yield StreamEvent(type="text", text=fallback)
+        yield StreamEvent(type="done")

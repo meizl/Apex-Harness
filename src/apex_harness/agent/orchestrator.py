@@ -16,6 +16,7 @@ from typing import Any, AsyncIterator
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from apex_harness.agent.events import StreamEvent, new_generation_id
 from apex_harness.agent.loop import AgentLoop
 from apex_harness.agent.planner import Planner
 from apex_harness.llm.base import LLMProvider
@@ -111,6 +112,32 @@ class Orchestrator:
             # 简单任务：直接 ReAct
             async for chunk in self.react.run_stream(user_input, **kwargs):
                 yield chunk
+
+    async def run_stream_events(self, user_input: str, **kwargs: Any) -> AsyncIterator[StreamEvent]:
+        """流式执行并产出结构化事件（先路由，再调度执行器）。
+
+        简单任务直接把 ReAct 的事件透传；复杂任务把 Plan-and-Execute 的
+        文本输出包装成事件（用同一 generation_id 标识该次执行）。
+        """
+        mode = await self._classify(user_input)
+
+        if mode == "complex":
+            async for ev in self._run_plan_and_execute_events(user_input, **kwargs):
+                yield ev
+        else:
+            async for ev in self.react.run_stream_events(user_input, **kwargs):
+                yield ev
+
+    async def _run_plan_and_execute_events(
+        self, user_input: str, **kwargs: Any
+    ) -> AsyncIterator[StreamEvent]:
+        """把 Plan-and-Execute 的文本流包装为事件流。"""
+        generation_id = new_generation_id()
+        yield StreamEvent(type="generation_start", generation_id=generation_id)
+        async for text in self._run_plan_and_execute(user_input, **kwargs):
+            if text:
+                yield StreamEvent(type="text", generation_id=generation_id, text=text)
+        yield StreamEvent(type="done", generation_id=generation_id)
 
     async def _run_plan_and_execute(
         self, user_input: str, **kwargs: Any

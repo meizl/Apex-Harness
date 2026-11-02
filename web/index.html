@@ -306,7 +306,15 @@
     sendBtn.disabled = true;
     statusEl.textContent = '生成中';
 
+    function finish() {
+      sendBtn.disabled = false;
+      statusEl.textContent = '就绪';
+      inputEl.focus();
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
     try {
+      // 1. 提交消息，拿到 task_id（生成在后台进行，与连接解耦）
       const res = await fetch('/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -322,30 +330,44 @@
         throw new Error(detail);
       }
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder('utf-8');
+      const data = await res.json();
+      const taskId = data.task_id;
+
+      // 2. 订阅事件流；EventSource 断线会自动重连并带上 Last-Event-ID 补发
+      const es = new EventSource('/events/' + taskId);
       let fullText = '';
+      let closed = false;
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        fullText += decoder.decode(value, { stream: true });
-        pendingBubble.classList.remove('pending');
-        pendingBubble.textContent = fullText;
-        messagesEl.scrollTop = messagesEl.scrollHeight;
-      }
+      es.onmessage = (e) => {
+        let ev;
+        try { ev = JSON.parse(e.data); } catch (err) { return; }
 
-      fullText += decoder.decode();
-      pendingBubble.classList.remove('pending');
-      pendingBubble.textContent = fullText || '(空回复)';
+        if (ev.type === 'text' || ev.type === 'error') {
+          fullText += (ev.text || '');
+          pendingBubble.classList.remove('pending');
+          pendingBubble.textContent = fullText;
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
+
+        if (ev.type === 'done' || ev.type === 'error') {
+          closed = true;
+          es.close();
+          pendingBubble.classList.remove('pending');
+          if (ev.type === 'done' && !fullText) pendingBubble.textContent = '(空回复)';
+          finish();
+        }
+      };
+
+      es.onerror = () => {
+        // 网络断开时 EventSource 会自动重连；这里只提示，不结束。
+        if (!closed) statusEl.textContent = '连接中断，重连中…';
+      };
     } catch (err) {
       pendingBubble.classList.remove('pending');
-      if (!pendingBubble.textContent) pendingBubble.textContent = '请求失败：' + err.message;
-    } finally {
-      sendBtn.disabled = false;
-      statusEl.textContent = '就绪';
-      inputEl.focus();
-      messagesEl.scrollTop = messagesEl.scrollHeight;
+      if (!pendingBubble.textContent || pendingBubble.textContent === '思考中…') {
+        pendingBubble.textContent = '请求失败：' + err.message;
+      }
+      finish();
     }
   }
 
