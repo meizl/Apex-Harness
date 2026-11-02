@@ -9,6 +9,7 @@
 - ``tool_call``         模型发起工具调用
 - ``tool_result``       工具执行结果
 - ``generation_end``    一轮模型生成结束
+- ``generation_failed`` 一轮模型生成失败（本轮未完成，前端应回退该轮文本）
 - ``done``              整个任务完成（终态）
 - ``error``             出错（终态）
 """

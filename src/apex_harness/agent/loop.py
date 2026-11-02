@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, AsyncIterator
 
@@ -52,6 +53,7 @@ class AgentLoop:
         *,
         tools: dict[str, Tool] | None = None,
         max_steps: int = 10,
+        stream_max_retries: int = 2,
     ) -> None:
         #: 会话，所有消息都写在这里。
         self.session = session
@@ -63,6 +65,8 @@ class AgentLoop:
         }
         #: 最大循环步数，防止模型无限调工具。
         self.max_steps = max_steps
+        #: 流式输出中途中断时的最大重跑次数（已产出部分内容才会触发）。
+        self.stream_max_retries = stream_max_retries
         #: 已执行工具结果的缓存，key 为 tool_call_id，避免重试/重入时重复执行。
         self._tool_results: dict[str, str] = {}
 
@@ -159,19 +163,40 @@ class AgentLoop:
     async def run_stream(self, user_input: str, **kwargs: Any) -> AsyncIterator[str]:
         """流式执行一次 Agent 交互，逐个产出回复文本。
 
-        这是 :meth:`run_stream_events` 的文本封装：只产出 ``text`` / ``error``
-        事件里的文本内容，供只关心纯文本的调用方使用。
+        这是 :meth:`run_stream_events` 的文本封装。它按 ``generation_id``
+        缓存每轮文本，遇到 ``generation_failed`` 时丢弃该轮半截文本（回退），
+        只在 ``generation_end`` / ``done`` / ``error`` 时落定并产出，避免
+        中断重跑时新旧内容混合。
         """
+        pending: list[str] = []
+
         async for ev in self.run_stream_events(user_input, **kwargs):
-            if ev.type in ("text", "error") and ev.text:
+            if ev.type == "text":
+                pending.append(ev.text)
+            elif ev.type == "generation_failed":
+                # 回退：丢弃本轮未完成的半截文本。
+                pending.clear()
+            elif ev.type == "generation_end":
+                for t in pending:
+                    yield t
+                pending.clear()
+            elif ev.type == "error":
+                for t in pending:
+                    yield t
+                pending.clear()
                 yield ev.text
+            elif ev.type == "done":
+                for t in pending:
+                    yield t
+                pending.clear()
 
     async def run_stream_events(self, user_input: str, **kwargs: Any) -> AsyncIterator[StreamEvent]:
         """流式执行一次 Agent 交互，产出结构化 :class:`StreamEvent`。
 
         与 :meth:`run_stream` 的流程一致，但每轮模型生成都用独立的
-        ``generation_id`` 标识，并把文本增量、工具调用、工具结果等以事件
-        形式产出，供上层做持久化、断线补发与回放。
+        ``generation_id`` 标识。若某轮流式输出中途中断且已产出部分内容，
+        则标记该轮 ``generation_failed``、回退到本轮开始前的会话状态，并以
+        新的 ``generation_id`` 重新请求，避免新旧内容混合。
         """
         # 1. 写入用户消息
         self.session.add_user(user_input)
@@ -180,48 +205,67 @@ class AgentLoop:
 
         # 2. 多步循环
         for step in range(self.max_steps):
+            # 本轮开始前的会话状态（重跑时复用，即"回退点"）。
             messages = self.session.to_llm_format()
-            generation_id = new_generation_id()
-
-            # 累积本轮的文本片段和工具调用 delta
+            generation_id = ""
             content_parts: list[str] = []
             # index -> {id, name, args_str}
             tc_map: dict[int, dict[str, Any]] = {}
 
-            yield StreamEvent(type="generation_start", generation_id=generation_id)
+            # 2a. 流式调用 LLM；中途中断则回退重跑。
+            attempt = 0
+            while True:
+                generation_id = new_generation_id()
+                content_parts = []
+                tc_map = {}
 
-            # 2a. 流式调用 LLM，文本逐块产出事件
-            try:
-                async for chunk in self.llm.stream(messages, tools=tools_schema, **kwargs):
-                    if chunk.content:
-                        content_parts.append(chunk.content)
-                        yield StreamEvent(type="text", generation_id=generation_id, text=chunk.content)
+                yield StreamEvent(type="generation_start", generation_id=generation_id)
 
-                    # 2b. 累积工具调用 delta（按 index 合并）
-                    for tc in chunk.tool_calls or []:
-                        idx = tc.get("index", 0)
-                        entry = tc_map.setdefault(idx, {"id": "", "name": "", "args_str": ""})
-                        if tc.get("id"):
-                            entry["id"] = tc["id"]
-                        fn = tc.get("function") or {}
-                        if fn.get("name"):
-                            entry["name"] = fn["name"]
-                        if fn.get("arguments"):
-                            entry["args_str"] += fn["arguments"]
-            except LLMError as exc:
-                error_msg = f"\n\n{friendly_llm_error(exc)}"
-                self.session.add_assistant("".join(content_parts) + error_msg)
-                yield StreamEvent(type="error", generation_id=generation_id, text=error_msg)
-                return
+                try:
+                    async for chunk in self.llm.stream(messages, tools=tools_schema, **kwargs):
+                        if chunk.content:
+                            content_parts.append(chunk.content)
+                            yield StreamEvent(type="text", generation_id=generation_id, text=chunk.content)
 
-            # 2c. 没有工具调用 → 最终回复
+                        # 累积工具调用 delta（按 index 合并）
+                        for tc in chunk.tool_calls or []:
+                            idx = tc.get("index", 0)
+                            entry = tc_map.setdefault(idx, {"id": "", "name": "", "args_str": ""})
+                            if tc.get("id"):
+                                entry["id"] = tc["id"]
+                            fn = tc.get("function") or {}
+                            if fn.get("name"):
+                                entry["name"] = fn["name"]
+                            if fn.get("arguments"):
+                                entry["args_str"] += fn["arguments"]
+                    # 正常结束本轮
+                    break
+                except LLMError as exc:
+                    produced = bool(content_parts) or bool(tc_map)
+                    # 已产出部分内容且还有重跑次数 → 标记 failed，回退重跑。
+                    if produced and attempt < self.stream_max_retries:
+                        yield StreamEvent(
+                            type="generation_failed",
+                            generation_id=generation_id,
+                            data={"reason": friendly_llm_error(exc)},
+                        )
+                        attempt += 1
+                        await asyncio.sleep(min(1.0 * (2 ** attempt), 30.0))
+                        continue
+                    # 未产出内容 / 重跑耗尽：丢弃半截内容，报错结束。
+                    error_msg = f"\n\n{friendly_llm_error(exc)}"
+                    self.session.add_assistant(error_msg)
+                    yield StreamEvent(type="error", generation_id=generation_id, text=error_msg)
+                    return
+
+            # 2b. 没有工具调用 → 最终回复
             if not tc_map:
                 self.session.add_assistant("".join(content_parts))
                 yield StreamEvent(type="generation_end", generation_id=generation_id)
                 yield StreamEvent(type="done", generation_id=generation_id)
                 return
 
-            # 2d. 有工具调用 → 拼装成 LangChain 格式
+            # 2c. 有工具调用 → 拼装成 LangChain 格式
             tool_calls = []
             for idx in sorted(tc_map.keys()):
                 entry = tc_map[idx]
@@ -235,11 +279,11 @@ class AgentLoop:
                     "id": entry["id"],
                 })
 
-            # 2e. 把 assistant 消息（带 tool_calls）写进历史
+            # 2d. 把 assistant 消息（带 tool_calls）写进历史
             self.session.add_assistant("".join(content_parts), tool_calls=tool_calls)
             yield StreamEvent(type="generation_end", generation_id=generation_id)
 
-            # 2f. 逐个执行工具，把结果写回历史
+            # 2e. 逐个执行工具，把结果写回历史
             for tool_call in tool_calls:
                 yield StreamEvent(
                     type="tool_call",
@@ -259,7 +303,7 @@ class AgentLoop:
                     data={"id": call_id, "result": result},
                 )
 
-            # 2g. 继续循环：LLM 下一轮会看到工具结果
+            # 2f. 继续循环：LLM 下一轮会看到工具结果
 
         # 3. 超过最大步数，兜底返回
         fallback = f"已达到最大步数 {self.max_steps}，未能得到最终回复。"

@@ -335,25 +335,50 @@
 
       // 2. 订阅事件流；EventSource 断线会自动重连并带上 Last-Event-ID 补发
       const es = new EventSource('/events/' + taskId);
-      let fullText = '';
+      // 按 generation_id 分组缓存文本，支持中断重跑时回退（丢弃失败轮）。
+      const genText = {};
+      const genOrder = [];
+      const failedGens = new Set();
       let closed = false;
+
+      function render() {
+        let out = '';
+        for (const gid of genOrder) {
+          if (failedGens.has(gid)) continue;
+          out += (genText[gid] || '');
+        }
+        pendingBubble.classList.remove('pending');
+        pendingBubble.textContent = out;
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
 
       es.onmessage = (e) => {
         let ev;
         try { ev = JSON.parse(e.data); } catch (err) { return; }
+        const gid = ev.generation_id || '';
 
         if (ev.type === 'text' || ev.type === 'error') {
-          fullText += (ev.text || '');
-          pendingBubble.classList.remove('pending');
-          pendingBubble.textContent = fullText;
-          messagesEl.scrollTop = messagesEl.scrollHeight;
+          if (ev.text) {
+            if (!(gid in genText)) { genText[gid] = ''; genOrder.push(gid); }
+            genText[gid] += ev.text;
+          }
+          render();
+        } else if (ev.type === 'generation_failed') {
+          // 本轮未完成，丢弃该 generation 的半截文本。
+          failedGens.add(gid);
+          render();
         }
 
         if (ev.type === 'done' || ev.type === 'error') {
           closed = true;
           es.close();
-          pendingBubble.classList.remove('pending');
-          if (ev.type === 'done' && !fullText) pendingBubble.textContent = '(空回复)';
+          render();
+          if (ev.type === 'done') {
+            const shown = genOrder
+              .filter((g) => !failedGens.has(g))
+              .reduce((s, g) => s + (genText[g] || ''), '');
+            if (!shown) pendingBubble.textContent = '(空回复)';
+          }
           finish();
         }
       };
