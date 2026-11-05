@@ -16,22 +16,25 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from langchain_core.messages import SystemMessage, message_to_dict
 from pydantic import BaseModel
 
 from apex_harness.agent.orchestrator import Orchestrator
 from apex_harness.core.kernel import Kernel
 from apex_harness.llm.openai import OpenAIProvider
 from apex_harness.server.tasks import TaskManager
+from apex_harness.session.checkpoint import load_checkpoint, save_checkpoint
 from apex_harness.session.session import Session
 from apex_harness.skills import SkillRegistryPlugin, load_builtin_skills, load_skills_from_dir
 from apex_harness.storage.local import LocalEventStore
@@ -49,6 +52,8 @@ from apex_harness.tools.web import WebFetchTool
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 # 前端静态目录：项目根 /web
 WEB_DIR = PROJECT_ROOT / "web"
+# 会话 checkpoint 目录：按 workspace hash 隔离存储
+SESSIONS_DIR = PROJECT_ROOT / "sessions"
 
 
 def _load_dotenv(path: Path) -> None:
@@ -114,14 +119,28 @@ async def lifespan(app: FastAPI):
 
     llm = kernel.services.require("llm")
     registry = kernel.services.require("tools")
-    session = Session()
 
     # 作为第一条系统消息注入，每次 LLM 调用都会带上
     apex_md_path = Path(workspace_dir) / "Apex.md"
     apex_md = ""
     if apex_md_path.exists():
         apex_md = apex_md_path.read_text(encoding="utf-8")
-        session.add_system(apex_md)
+
+    # 从 checkpoint 恢复会话（按 workspace hash 隔离）；不存在则新建
+    session = load_checkpoint(SESSIONS_DIR, workspace_dir)
+    if session is None:
+        session = Session()
+        if apex_md:
+            session.add_system(apex_md)
+    else:
+        # 恢复后同步最新 Apex.md 到第一条 system 消息
+        if session.messages and session.messages[0].type == "system":
+            if apex_md:
+                session.messages[0] = SystemMessage(content=apex_md)
+            else:
+                session.messages.pop(0)
+        elif apex_md:
+            session.messages.insert(0, SystemMessage(content=apex_md))
 
     orch = Orchestrator(session, llm, tools=registry.all)
 
@@ -166,13 +185,21 @@ async def set_workspace(req: WorkspaceRequest) -> dict[str, str]:
 
         raise HTTPException(status_code=400, detail=f"目录不存在或不是目录: {req.path}")
 
+    # 先保存当前 workspace 的会话
+    try:
+        save_checkpoint(
+            app.state.orchestrator.session, SESSIONS_DIR, str(app.state.workspace_dir)
+        )
+    except Exception:
+        pass
+
     # 更新所有文件系统工具的 base_dir
     for tool in app.state.registry.all.values():
         set_dir = getattr(tool, "set_base_dir", None)
         if callable(set_dir):
             set_dir(str(new_dir))
 
-    # 重新加载 Apex.md 并重建会话（项目说明变了，相当于新会话）
+    # 重新加载 Apex.md 并从 checkpoint 恢复新 workspace 的会话
     apex_md_path = new_dir / "Apex.md"
     apex_md = ""
     if apex_md_path.exists():
@@ -180,9 +207,20 @@ async def set_workspace(req: WorkspaceRequest) -> dict[str, str]:
 
     llm = app.state.kernel.services.require("llm")
     registry = app.state.kernel.services.require("tools")
-    session = Session()
-    if apex_md:
-        session.add_system(apex_md)
+
+    session = load_checkpoint(SESSIONS_DIR, str(new_dir))
+    if session is None:
+        session = Session()
+        if apex_md:
+            session.add_system(apex_md)
+    else:
+        if session.messages and session.messages[0].type == "system":
+            if apex_md:
+                session.messages[0] = SystemMessage(content=apex_md)
+            else:
+                session.messages.pop(0)
+        elif apex_md:
+            session.messages.insert(0, SystemMessage(content=apex_md))
 
     app.state.workspace_dir = str(new_dir)
     app.state.apex_md = apex_md
@@ -194,6 +232,13 @@ async def set_workspace(req: WorkspaceRequest) -> dict[str, str]:
 async def get_apex_md() -> dict[str, str]:
     """返回当前加载的 Apex.md 内容。"""
     return {"content": app.state.apex_md}
+
+
+@app.get("/api/messages")
+async def get_messages() -> list[dict[str, Any]]:
+    """返回当前会话的所有消息，供前端刷新后恢复展示。"""
+    session: Session = app.state.orchestrator.session
+    return [message_to_dict(m) for m in session.messages]
 
 
 @app.post("/chat")
@@ -219,7 +264,21 @@ async def chat(request: ChatRequest) -> dict[str, str]:
 
     task_id = uuid.uuid4().hex
     gen = orch.run_stream_events(request.message, **params)
-    tasks.start(task_id, gen)
+    task = tasks.start(task_id, gen)
+
+    # 任务完成后异步保存 checkpoint（不阻塞返回 task_id）
+    async def _save_after_done() -> None:
+        try:
+            await task
+        except Exception:
+            pass
+        try:
+            save_checkpoint(orch.session, SESSIONS_DIR, str(app.state.workspace_dir))
+        except Exception:
+            pass
+
+    asyncio.create_task(_save_after_done())
+
     return {"task_id": task_id}
 
 

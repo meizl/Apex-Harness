@@ -244,6 +244,26 @@
   }
   loadWorkspace();
 
+  // 页面加载时恢复历史消息
+  async function loadHistory() {
+    try {
+      const res = await fetch('/api/messages');
+      const messages = await res.json();
+      for (const m of messages) {
+        const type = m.type;
+        const content = (m.data && m.data.content) || '';
+        if (!content) continue;
+        if (type === 'human') {
+          addMessage('user', content);
+        } else if (type === 'ai') {
+          addMessage('assistant', content);
+        }
+        // system / tool 消息不展示
+      }
+    } catch (e) {}
+  }
+  loadHistory();
+
   setWorkspaceBtn.addEventListener('click', async () => {
     const path = workspaceInput.value.trim();
     if (!path) return;
