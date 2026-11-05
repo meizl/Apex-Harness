@@ -67,7 +67,7 @@ class ChatRequest(BaseModel):
 
     message: str
     temperature: float = 0.7
-    max_tokens: int | None = None
+    max_tokens: Optional[int] = None
     top_p: float = 1.0
     frequency_penalty: float = 0.0
     presence_penalty: float = 0.0
@@ -234,6 +234,17 @@ async def events(task_id: str, request: Request) -> StreamingResponse:
             yield f"data: {json.dumps(entry, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+@app.post("/tasks/{task_id}/cancel")
+async def cancel_task(task_id: str) -> dict[str, Any]:
+    """取消指定后台生成任务。
+
+    成功后任务会被中断，并产生一条 ``cancelled`` 终态事件，供订阅者与回放使用。
+    """
+    tasks: TaskManager = app.state.tasks
+    cancelled = await tasks.cancel(task_id)
+    return {"task_id": task_id, "cancelled": cancelled}
 
 
 # 前端页面挂在根路径；必须在路由定义之后 mount，避免覆盖 /chat

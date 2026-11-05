@@ -28,6 +28,8 @@ from langchain_core.messages import AIMessage, BaseMessage
 from apex_harness.core.errors import (
     LLMAuthenticationError,
     LLMError,
+    LLMRateLimitError,
+    LLMServiceError,
     LLMTimeoutError,
     raise_for_llm_status,
     retry,

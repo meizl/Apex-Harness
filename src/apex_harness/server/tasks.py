@@ -44,6 +44,12 @@ class TaskManager:
             try:
                 async for ev in gen:
                     self.append_event(task_id, ev.to_dict())
+            except asyncio.CancelledError:
+                # 取消时显式关闭底层生成器：否则生成器会停在 yield 处泄漏，
+                # 正在进行的 LLM 流式连接 / 工具子进程等资源不会被及时释放。
+                with suppress(Exception):
+                    await gen.aclose()
+                raise
             except Exception as exc:  # noqa: BLE001 - 兜底转成 error 事件
                 logger.exception("任务 %s 生成失败", task_id)
                 self.append_event(
@@ -54,6 +60,22 @@ class TaskManager:
         task = asyncio.create_task(runner())
         self._tasks[task_id] = task
         return task
+
+    async def cancel(self, task_id: str) -> bool:
+        """取消后台生成任务，并追加 ``cancelled`` 终态事件。
+
+        已结束或不存在则返回 ``False``。``task.cancel()`` 会在生成器下一个
+        ``await`` 挂起点注入 ``CancelledError``，从而打断模型流式输出。
+        """
+        task = self._tasks.get(task_id)
+        if task is None or task.done():
+            return False
+        task.cancel()
+        self.append_event(
+            task_id,
+            StreamEvent(type="cancelled", text="已停止生成").to_dict(),
+        )
+        return True
 
     def read_since(self, task_id: str, after_id: int) -> list[dict[str, Any]]:
         """补发历史事件。"""
@@ -81,7 +103,7 @@ class TaskManager:
                     continue
                 yield e
                 last = e["id"]
-                if e.get("type") in ("done", "error"):
+                if e.get("type") in ("done", "error", "cancelled"):
                     break
         finally:
             subs.discard(q)

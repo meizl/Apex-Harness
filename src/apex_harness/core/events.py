@@ -10,12 +10,12 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import defaultdict
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
 # A handler receives an Event and returns nothing (sync or async).
-EventHandler = Callable[["Event"], Awaitable[None] | None]
+EventHandler = Callable[["Event"], Optional[Awaitable[None]]]
 
 #事件
 class Event:

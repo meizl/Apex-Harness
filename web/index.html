@@ -127,6 +127,10 @@
   button.send:hover { background: #2f6fe0; }
   button.send:disabled { opacity: .5; cursor: not-allowed; }
 
+  #stopBtn { background: #ef4444; }
+  #stopBtn:hover:not(:disabled) { background: #dc2626; }
+  #stopBtn:disabled { background: #cbd5e1; opacity: 1; cursor: not-allowed; }
+
   /* 参数面板：默认收起 */
   .params {
     max-height: 0;
@@ -203,6 +207,7 @@
       <button class="icon-btn" id="toggleParams" title="参数">⚙</button>
       <textarea id="input" rows="1" placeholder="输入消息，回车发送，Shift+回车换行"></textarea>
       <button class="send" id="send">发送</button>
+      <button class="send" id="stopBtn" disabled>停止</button>
     </div>
   </footer>
 
@@ -210,6 +215,7 @@
   const messagesEl = document.getElementById('messages');
   const inputEl = document.getElementById('input');
   const sendBtn = document.getElementById('send');
+  const stopBtn = document.getElementById('stopBtn');
   const statusEl = document.getElementById('status');
   const paramsEl = document.getElementById('params');
   const toggleParamsBtn = document.getElementById('toggleParams');
@@ -304,14 +310,36 @@
     const pendingBubble = addMessage('assistant', '思考中…', true);
 
     sendBtn.disabled = true;
+    stopBtn.disabled = false;
     statusEl.textContent = '生成中';
+
+    let taskId = null;
+    let es = null;
+    let closed = false;
 
     function finish() {
       sendBtn.disabled = false;
+      stopBtn.disabled = true;
       statusEl.textContent = '就绪';
       inputEl.focus();
       messagesEl.scrollTop = messagesEl.scrollHeight;
     }
+
+    function stop() {
+      if (closed) return;
+      closed = true;
+      if (es) es.close();
+      // 通知后端取消后台生成任务；cancelled 事件会持久化，供回放。
+      if (taskId) {
+        fetch('/tasks/' + taskId + '/cancel', { method: 'POST' }).catch(() => {});
+      }
+      pendingBubble.classList.remove('pending');
+      if (!pendingBubble.textContent || pendingBubble.textContent === '思考中…') {
+        pendingBubble.textContent = '(已停止)';
+      }
+      finish();
+    }
+    stopBtn.onclick = stop;
 
     try {
       // 1. 提交消息，拿到 task_id（生成在后台进行，与连接解耦）
@@ -331,25 +359,70 @@
       }
 
       const data = await res.json();
-      const taskId = data.task_id;
+      taskId = data.task_id;
 
       // 2. 订阅事件流；EventSource 断线会自动重连并带上 Last-Event-ID 补发
-      const es = new EventSource('/events/' + taskId);
+      es = new EventSource('/events/' + taskId);
       // 按 generation_id 分组缓存文本，支持中断重跑时回退（丢弃失败轮）。
       const genText = {};
       const genOrder = [];
       const failedGens = new Set();
-      let closed = false;
 
-      function render() {
+      let renderedLen = 0;
+      let rafId = null;
+      let lastTypeTs = null;
+      const TYPE_SPEED = 30; // 固定打字速度：字/秒
+
+      function currentTarget() {
         let out = '';
         for (const gid of genOrder) {
           if (failedGens.has(gid)) continue;
           out += (genText[gid] || '');
         }
+        return out;
+      }
+
+      function stopTyping() {
+        if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+      }
+
+      function stepType(ts) {
+        const target = currentTarget();
+        if (renderedLen >= target.length) {
+          pendingBubble.classList.remove('pending');
+          pendingBubble.textContent = target;
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+          rafId = null;
+          lastTypeTs = null;
+          return;
+        }
+        if (lastTypeTs == null) lastTypeTs = ts;
+        const dt = Math.max(0, ts - lastTypeTs);
+        // 固定速度逐字推进，与文本长度无关，保证长任务也有打字机效果
+        const step = Math.max(1, Math.round((dt / 1000) * TYPE_SPEED));
+        renderedLen = Math.min(renderedLen + step, target.length);
+        lastTypeTs = ts;
         pendingBubble.classList.remove('pending');
-        pendingBubble.textContent = out;
+        pendingBubble.textContent = target.slice(0, renderedLen);
         messagesEl.scrollTop = messagesEl.scrollHeight;
+        rafId = requestAnimationFrame(stepType);
+      }
+
+      function render(immediate) {
+        const target = currentTarget();
+        // 回退（generation_failed）：目标变短时重置已显示长度
+        if (renderedLen > target.length) renderedLen = 0;
+        stopTyping();
+        lastTypeTs = null;
+        if (immediate) {
+          renderedLen = target.length;
+          pendingBubble.classList.remove('pending');
+          pendingBubble.textContent = target;
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+          rafId = null;
+        } else {
+          rafId = requestAnimationFrame(stepType);
+        }
       }
 
       es.onmessage = (e) => {
@@ -369,15 +442,20 @@
           render();
         }
 
-        if (ev.type === 'done' || ev.type === 'error') {
+        if (ev.type === 'done' || ev.type === 'error' || ev.type === 'cancelled') {
           closed = true;
           es.close();
-          render();
+          render(true);
           if (ev.type === 'done') {
             const shown = genOrder
               .filter((g) => !failedGens.has(g))
               .reduce((s, g) => s + (genText[g] || ''), '');
             if (!shown) pendingBubble.textContent = '(空回复)';
+          } else if (ev.type === 'cancelled') {
+            const shown = genOrder
+              .filter((g) => !failedGens.has(g))
+              .reduce((s, g) => s + (genText[g] || ''), '');
+            if (!shown) pendingBubble.textContent = '(已停止)';
           }
           finish();
         }

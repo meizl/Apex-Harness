@@ -10,14 +10,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Optional
 
 from .events import Event, EventBus, EventHandler
 from .services import ServiceRegistry
 
 logger = logging.getLogger(__name__)
 
-DisposeCallback = Callable[[], Awaitable[None] | None]
+DisposeCallback = Callable[[], Optional[Awaitable[None]]]
 
 #插件通过 ctx 注册服务、监听事件、注册清理回调
 class Context:

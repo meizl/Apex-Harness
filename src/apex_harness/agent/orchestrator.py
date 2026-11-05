@@ -131,12 +131,59 @@ class Orchestrator:
     async def _run_plan_and_execute_events(
         self, user_input: str, **kwargs: Any
     ) -> AsyncIterator[StreamEvent]:
-        """把 Plan-and-Execute 的文本流包装为事件流。"""
+        """把 Plan-and-Execute 的执行过程产出为事件流。
+
+        每个步骤直接透传 ReAct 的 ``run_stream_events`` 事件，保证步骤内的
+        模型回复是 token 级流式的（前端能逐字渲染）；不再像旧实现那样经
+        ``run_stream`` 缓冲到整段结束才一次性吐出。
+        """
         generation_id = new_generation_id()
         yield StreamEvent(type="generation_start", generation_id=generation_id)
-        async for text in self._run_plan_and_execute(user_input, **kwargs):
-            if text:
-                yield StreamEvent(type="text", generation_id=generation_id, text=text)
+
+        yield StreamEvent(type="text", generation_id=generation_id, text="🔍 正在分析任务并生成执行计划...\n\n")
+        steps = await self.planner.plan(user_input)
+
+        if not steps:
+            yield StreamEvent(type="text", generation_id=generation_id, text="计划生成失败，改为直接执行。\n\n")
+            async for ev in self.react.run_stream_events(user_input, **kwargs):
+                if ev.type == "done":
+                    continue
+                yield ev
+            yield StreamEvent(type="done", generation_id=generation_id)
+            return
+
+        self.plan = [PlanStep(description=s) for s in steps]
+
+        yield StreamEvent(type="text", generation_id=generation_id, text="📋 执行计划：\n")
+        for i, step in enumerate(steps, 1):
+            yield StreamEvent(type="text", generation_id=generation_id, text=f"  {i}. {step}\n")
+        yield StreamEvent(type="text", generation_id=generation_id, text="\n")
+
+        for i, step in enumerate(steps, 1):
+            plan_step = self.plan[i - 1]
+            plan_step.status = StepStatus.RUNNING
+            yield StreamEvent(type="text", generation_id=generation_id, text=f"\n⏳ 步骤 {i}/{len(steps)}：{step}\n")
+            try:
+                async for ev in self.react.run_stream_events(step, **kwargs):
+                    # 步骤内部的 done 不对外，由外层统一收尾，避免提前关闭 SSE。
+                    if ev.type == "done":
+                        continue
+                    # 步骤内出错：把错误文本透传为 text，但不作为整体终态。
+                    if ev.type == "error":
+                        if ev.text:
+                            yield StreamEvent(type="text", generation_id=ev.generation_id, text=ev.text)
+                        continue
+                    yield ev
+                plan_step.status = StepStatus.DONE
+                yield StreamEvent(type="text", generation_id=generation_id, text=f"\n✅ 步骤 {i}/{len(steps)} 完成\n")
+            except Exception as exc:  # noqa: BLE001 - 单步失败不中断整体
+                plan_step.status = StepStatus.FAILED
+                plan_step.error = str(exc)
+                yield StreamEvent(type="text", generation_id=generation_id, text=f"\n❌ 步骤 {i}/{len(steps)} 失败：{exc}\n")
+
+        done = sum(1 for s in self.plan if s.status is StepStatus.DONE)
+        failed = sum(1 for s in self.plan if s.status is StepStatus.FAILED)
+        yield StreamEvent(type="text", generation_id=generation_id, text=f"\n✅ 完成 {done} 步，失败 {failed} 步。")
         yield StreamEvent(type="done", generation_id=generation_id)
 
     async def _run_plan_and_execute(

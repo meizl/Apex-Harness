@@ -50,6 +50,7 @@ Thumbs.db
 # Project specific
 *.log
 .apex/
+.events/
 sessions/
 tmp/
 
