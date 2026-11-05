@@ -44,6 +44,18 @@ class Context:
         self._event_handlers: list[tuple[str, EventHandler]] = []
         self._dispose_callbacks: list[DisposeCallback] = []
 
+    # -- read-only accessors (for lazy plugin binding) --------------------
+
+    @property
+    def event_bus(self) -> EventBus:
+        """共享的事件总线（只读访问，供延迟加载的插件绑定 Context）。"""
+        return self._event_bus
+
+    @property
+    def services(self) -> ServiceRegistry:
+        """共享的服务注册表（只读访问）。"""
+        return self._services
+
     # -- event bus helpers -------------------------------------------------
 
     def on(self, event_name: str, handler: EventHandler) -> None:

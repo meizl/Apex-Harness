@@ -33,6 +33,7 @@ from apex_harness.core.kernel import Kernel
 from apex_harness.llm.openai import OpenAIProvider
 from apex_harness.server.tasks import TaskManager
 from apex_harness.session.session import Session
+from apex_harness.skills import SkillRegistryPlugin, load_builtin_skills, load_skills_from_dir
 from apex_harness.storage.local import LocalEventStore
 from apex_harness.tools.filesystem import (
     DeleteFileTool,
@@ -90,9 +91,18 @@ async def lifespan(app: FastAPI):
     }
 
     kernel = Kernel(config=tool_config)
+
+    # 收集技能元数据：内置（SKILL.md）+ 外部目录（APEX_SKILLS_DIR，可选）
+    # 渐进式披露：启动时只注册 name/description，LLM 调用时才注入完整 instructions。
+    skills_metadata = load_builtin_skills()
+    external_skills_dir = os.environ.get("APEX_SKILLS_DIR")
+    if external_skills_dir:
+        skills_metadata.extend(load_skills_from_dir(external_skills_dir))
+
     await kernel.mount_all([
         OpenAIProvider(),
         ToolRegistryPlugin(),
+        SkillRegistryPlugin(skills_metadata),
         ReadFileTool(),
         WriteFileTool(),
         ListDirTool(),
