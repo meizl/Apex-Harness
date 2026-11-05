@@ -2,6 +2,10 @@
 
 主循环负责把单轮 ``Turn`` 串成多步推理：模型可以反复调用工具，直到给出
 最终回复。这是 Agent 能力的核心（ReAct 模式）。
+
+循环的所有上下文都收敛到 :class:`~apex_harness.agent.state.AgentState` 中
+（类 LangGraph 的 StateGraph），通过 ``state.next_step`` 驱动状态机：
+``llm`` →（有工具调用）``tools`` → ``llm`` → … → ``done``。
 """
 
 from __future__ import annotations
@@ -13,6 +17,13 @@ from typing import Any, AsyncIterator
 from langchain_core.messages import AIMessage
 
 from apex_harness.agent.events import StreamEvent, new_generation_id
+from apex_harness.agent.state import (
+    NEXT_STEP_DONE,
+    NEXT_STEP_ERROR,
+    NEXT_STEP_LLM,
+    NEXT_STEP_TOOLS,
+    AgentState,
+)
 from apex_harness.core.errors import LLMError, friendly_llm_error
 from apex_harness.llm.base import LLMProvider
 from apex_harness.session.session import Session
@@ -67,8 +78,6 @@ class AgentLoop:
         self.max_steps = max_steps
         #: 流式输出中途中断时的最大重跑次数（已产出部分内容才会触发）。
         self.stream_max_retries = stream_max_retries
-        #: 已执行工具结果的缓存，key 为 tool_call_id，避免重试/重入时重复执行。
-        self._tool_results: dict[str, str] = {}
 
     # -- 工具 schema ------------------------------------------------------
 
@@ -78,24 +87,26 @@ class AgentLoop:
 
     # -- 工具执行 ---------------------------------------------------------
 
-    async def _execute_tool_call(self, tool_call: dict[str, Any]) -> str:
+    async def _execute_tool_call(
+        self, tool_call: dict[str, Any], cache: dict[str, str]
+    ) -> str:
         """执行一次工具调用，返回结果字符串。
 
         LangChain ``AIMessage.tool_calls`` 的格式是
         ``{"name": ..., "args": {...}, "id": ...}``，其中 ``args`` 已经是
         解析好的 dict。
 
-        以 ``tool_call_id`` 为幂等键缓存结果：同一调用重复进入时直接返回
-        缓存，避免工具被重复执行。任何异常都被捕获并转成字符串返回，保证
-        循环不中断——模型看到错误信息后可以自行纠正。
+        以 ``tool_call_id`` 为幂等键缓存结果（写入 ``cache``）：同一调用
+        重复进入时直接返回缓存，避免工具被重复执行。任何异常都被捕获并转成
+        字符串返回，保证循环不中断——模型看到错误信息后可以自行纠正。
         """
         name = tool_call.get("name", "")
         args = tool_call.get("args", {}) or {}
         call_id = tool_call.get("id", "")
 
         # 幂等：已执行过的调用直接复用结果，不重复执行。
-        if call_id and call_id in self._tool_results:
-            return self._tool_results[call_id]
+        if call_id and call_id in cache:
+            return cache[call_id]
 
         tool = self.tools.get(name)
         if tool is None:
@@ -109,56 +120,89 @@ class AgentLoop:
                 result = f"Error: 执行工具 '{name}' 时出错: {exc}"
 
         if call_id:
-            self._tool_results[call_id] = result
+            cache[call_id] = result
         return result
 
-    # -- 主循环 -----------------------------------------------------------
+    # -- 状态初始化 -------------------------------------------------------
+
+    def _init_state(self, user_input: str) -> AgentState:
+        """创建本次运行的状态对象。
+
+        ``state.messages`` 直接引用 ``session.messages``，保证状态与会话
+        消息历史同步；写入 state 等于写入 session。
+        """
+        return AgentState(
+            messages=self.session.messages,
+            user_input=user_input,
+            next_step=NEXT_STEP_LLM,
+        )
+
+    # -- 主循环（非流式） -------------------------------------------------
 
     async def run(self, user_input: str, **kwargs: Any) -> str:
         """执行一次完整的 Agent 交互，返回最终回复文本。
 
         LLM 调用失败时返回友好的错误提示并写入会话，不抛出异常。
         """
-        # 1. 写入用户消息
+        # 1. 写入用户消息，初始化状态
         self.session.add_user(user_input)
-
+        state = self._init_state(user_input)
         tools_schema = self._tool_schemas() or None
 
-        # 2. 多步循环
-        for step in range(self.max_steps):
-            # 2a. 调 LLM
-            messages = self.session.to_llm_format()
-            try:
-                response: AIMessage = await self.llm.chat(
-                    messages, tools=tools_schema, **kwargs
-                )
-            except LLMError as exc:
-                error_msg = friendly_llm_error(exc)
-                self.session.add_assistant(error_msg)
-                return error_msg
+        # 2. 状态机循环
+        while state.iteration_count < self.max_steps and state.next_step not in (
+            NEXT_STEP_DONE,
+            NEXT_STEP_ERROR,
+        ):
+            if state.next_step == NEXT_STEP_LLM:
+                # 2a. 调 LLM
+                try:
+                    response: AIMessage = await self.llm.chat(
+                        state.messages, tools=tools_schema, **kwargs
+                    )
+                except LLMError as exc:
+                    error_msg = friendly_llm_error(exc)
+                    state.record_error(error_msg)
+                    state.next_step = NEXT_STEP_ERROR
+                    break
 
-            tool_calls = response.tool_calls
+                tool_calls = response.tool_calls
 
-            # 2b. 没有工具调用 → 最终回复
-            if not tool_calls:
-                self.session.add_assistant(response.content)
-                return response.content
+                # 2b. 没有工具调用 → 最终回复
+                if not tool_calls:
+                    self.session.add_assistant(response.content)
+                    state.next_step = NEXT_STEP_DONE
+                    return response.content
 
-            # 2c. 有工具调用 → 先把 assistant 消息（带 tool_calls）写进历史
-            self.session.add_assistant(response.content, tool_calls=tool_calls)
+                # 2c. 有工具调用 → 先把 assistant 消息（带 tool_calls）写进历史
+                self.session.add_assistant(response.content, tool_calls=tool_calls)
+                # 暂存本轮工具调用，下一步执行
+                state.pending_tool_calls = tool_calls
+                state.next_step = NEXT_STEP_TOOLS
 
-            # 2d. 逐个执行工具，把结果写回历史
-            for tool_call in tool_calls:
-                result = await self._execute_tool_call(tool_call)
-                call_id = tool_call.get("id", "")
-                self.session.add_tool(result, tool_call_id=call_id)
+            elif state.next_step == NEXT_STEP_TOOLS:
+                # 2d. 逐个执行工具，把结果写回历史
+                tool_calls = state.pending_tool_calls
+                for tool_call in tool_calls:
+                    result = await self._execute_tool_call(tool_call, state.tool_results)
+                    call_id = tool_call.get("id", "")
+                    self.session.add_tool(result, tool_call_id=call_id)
+                # 一轮完成，回到 LLM 决策
+                state.iteration_count += 1
+                state.next_step = NEXT_STEP_LLM
 
-            # 2e. 继续循环：LLM 下一轮会看到工具结果
+        # 3. 终态处理
+        if state.next_step == NEXT_STEP_ERROR:
+            error_msg = state.last_error()
+            self.session.add_assistant(error_msg)
+            return error_msg
 
-        # 3. 超过最大步数，兜底返回
+        # 超过最大步数，兜底返回
         fallback = f"已达到最大步数 {self.max_steps}，未能得到最终回复。"
         self.session.add_assistant(fallback)
         return fallback
+
+    # -- 主循环（流式文本） -----------------------------------------------
 
     async def run_stream(self, user_input: str, **kwargs: Any) -> AsyncIterator[str]:
         """流式执行一次 Agent 交互，逐个产出回复文本。
@@ -190,6 +234,8 @@ class AgentLoop:
                     yield t
                 pending.clear()
 
+    # -- 主循环（流式事件） -----------------------------------------------
+
     async def run_stream_events(self, user_input: str, **kwargs: Any) -> AsyncIterator[StreamEvent]:
         """流式执行一次 Agent 交互，产出结构化 :class:`StreamEvent`。
 
@@ -198,112 +244,128 @@ class AgentLoop:
         则标记该轮 ``generation_failed``、回退到本轮开始前的会话状态，并以
         新的 ``generation_id`` 重新请求，避免新旧内容混合。
         """
-        # 1. 写入用户消息
+        # 1. 写入用户消息，初始化状态
         self.session.add_user(user_input)
-
+        state = self._init_state(user_input)
         tools_schema = self._tool_schemas() or None
 
-        # 2. 多步循环
-        for step in range(self.max_steps):
-            # 本轮开始前的会话状态（重跑时复用，即"回退点"）。
-            messages = self.session.to_llm_format()
-            generation_id = ""
-            content_parts: list[str] = []
-            # index -> {id, name, args_str}
-            tc_map: dict[int, dict[str, Any]] = {}
+        # 2. 状态机循环
+        while state.iteration_count < self.max_steps and state.next_step not in (
+            NEXT_STEP_DONE,
+            NEXT_STEP_ERROR,
+        ):
+            if state.next_step == NEXT_STEP_LLM:
+                # 本轮开始前的会话快照（重跑时复用，即"回退点"）。
+                messages = list(state.messages)
+                generation_id = ""
+                content_parts: list[str] = []
+                # index -> {id, name, args_str}
+                tc_map: dict[int, dict[str, Any]] = {}
 
-            # 2a. 流式调用 LLM；中途中断则回退重跑。
-            attempt = 0
-            while True:
-                generation_id = new_generation_id()
-                content_parts = []
-                tc_map = {}
+                # 2a. 流式调用 LLM；中途中断则回退重跑。
+                attempt = 0
+                while True:
+                    generation_id = new_generation_id()
+                    content_parts = []
+                    tc_map = {}
 
-                yield StreamEvent(type="generation_start", generation_id=generation_id)
+                    yield StreamEvent(type="generation_start", generation_id=generation_id)
 
-                try:
-                    async for chunk in self.llm.stream(messages, tools=tools_schema, **kwargs):
-                        if chunk.content:
-                            content_parts.append(chunk.content)
-                            yield StreamEvent(type="text", generation_id=generation_id, text=chunk.content)
+                    try:
+                        async for chunk in self.llm.stream(messages, tools=tools_schema, **kwargs):
+                            if chunk.content:
+                                content_parts.append(chunk.content)
+                                yield StreamEvent(type="text", generation_id=generation_id, text=chunk.content)
 
-                        # 累积工具调用 delta（按 index 合并）
-                        for tc in chunk.tool_calls or []:
-                            idx = tc.get("index", 0)
-                            entry = tc_map.setdefault(idx, {"id": "", "name": "", "args_str": ""})
-                            if tc.get("id"):
-                                entry["id"] = tc["id"]
-                            fn = tc.get("function") or {}
-                            if fn.get("name"):
-                                entry["name"] = fn["name"]
-                            if fn.get("arguments"):
-                                entry["args_str"] += fn["arguments"]
-                    # 正常结束本轮
-                    break
-                except LLMError as exc:
-                    produced = bool(content_parts) or bool(tc_map)
-                    # 已产出部分内容且还有重跑次数 → 标记 failed，回退重跑。
-                    if produced and attempt < self.stream_max_retries:
-                        yield StreamEvent(
-                            type="generation_failed",
-                            generation_id=generation_id,
-                            data={"reason": friendly_llm_error(exc)},
-                        )
-                        attempt += 1
-                        await asyncio.sleep(min(1.0 * (2 ** attempt), 30.0))
-                        continue
-                    # 未产出内容 / 重跑耗尽：丢弃半截内容，报错结束。
-                    error_msg = f"\n\n{friendly_llm_error(exc)}"
-                    self.session.add_assistant(error_msg)
-                    yield StreamEvent(type="error", generation_id=generation_id, text=error_msg)
+                            # 累积工具调用 delta（按 index 合并）
+                            for tc in chunk.tool_calls or []:
+                                idx = tc.get("index", 0)
+                                entry = tc_map.setdefault(idx, {"id": "", "name": "", "args_str": ""})
+                                if tc.get("id"):
+                                    entry["id"] = tc["id"]
+                                fn = tc.get("function") or {}
+                                if fn.get("name"):
+                                    entry["name"] = fn["name"]
+                                if fn.get("arguments"):
+                                    entry["args_str"] += fn["arguments"]
+                        # 正常结束本轮
+                        break
+                    except LLMError as exc:
+                        produced = bool(content_parts) or bool(tc_map)
+                        # 已产出部分内容且还有重跑次数 → 标记 failed，回退重跑。
+                        if produced and attempt < self.stream_max_retries:
+                            yield StreamEvent(
+                                type="generation_failed",
+                                generation_id=generation_id,
+                                data={"reason": friendly_llm_error(exc)},
+                            )
+                            attempt += 1
+                            await asyncio.sleep(min(1.0 * (2 ** attempt), 30.0))
+                            continue
+                        # 未产出内容 / 重跑耗尽：丢弃半截内容，报错结束。
+                        error_msg = f"\n\n{friendly_llm_error(exc)}"
+                        state.record_error(error_msg)
+                        self.session.add_assistant(error_msg)
+                        yield StreamEvent(type="error", generation_id=generation_id, text=error_msg)
+                        state.next_step = NEXT_STEP_ERROR
+                        return
+
+                # 2b. 没有工具调用 → 最终回复
+                if not tc_map:
+                    self.session.add_assistant("".join(content_parts))
+                    yield StreamEvent(type="generation_end", generation_id=generation_id)
+                    yield StreamEvent(type="done", generation_id=generation_id)
+                    state.next_step = NEXT_STEP_DONE
                     return
 
-            # 2b. 没有工具调用 → 最终回复
-            if not tc_map:
-                self.session.add_assistant("".join(content_parts))
+                # 2c. 有工具调用 → 拼装成 LangChain 格式
+                tool_calls = []
+                for idx in sorted(tc_map.keys()):
+                    entry = tc_map[idx]
+                    try:
+                        args = json.loads(entry["args_str"] or "{}")
+                    except json.JSONDecodeError:
+                        args = {}
+                    tool_calls.append({
+                        "name": entry["name"],
+                        "args": args,
+                        "id": entry["id"],
+                    })
+
+                # 2d. 把 assistant 消息（带 tool_calls）写进历史
+                self.session.add_assistant("".join(content_parts), tool_calls=tool_calls)
                 yield StreamEvent(type="generation_end", generation_id=generation_id)
-                yield StreamEvent(type="done", generation_id=generation_id)
-                return
 
-            # 2c. 有工具调用 → 拼装成 LangChain 格式
-            tool_calls = []
-            for idx in sorted(tc_map.keys()):
-                entry = tc_map[idx]
-                try:
-                    args = json.loads(entry["args_str"] or "{}")
-                except json.JSONDecodeError:
-                    args = {}
-                tool_calls.append({
-                    "name": entry["name"],
-                    "args": args,
-                    "id": entry["id"],
-                })
+                # 暂存工具调用与 generation_id，下一步执行
+                state.pending_tool_calls = tool_calls
+                state.last_generation_id = generation_id
+                state.next_step = NEXT_STEP_TOOLS
 
-            # 2d. 把 assistant 消息（带 tool_calls）写进历史
-            self.session.add_assistant("".join(content_parts), tool_calls=tool_calls)
-            yield StreamEvent(type="generation_end", generation_id=generation_id)
-
-            # 2e. 逐个执行工具，把结果写回历史
-            for tool_call in tool_calls:
-                yield StreamEvent(
-                    type="tool_call",
-                    generation_id=generation_id,
-                    data={
-                        "name": tool_call["name"],
-                        "args": tool_call["args"],
-                        "id": tool_call["id"],
-                    },
-                )
-                result = await self._execute_tool_call(tool_call)
-                call_id = tool_call.get("id", "")
-                self.session.add_tool(result, tool_call_id=call_id)
-                yield StreamEvent(
-                    type="tool_result",
-                    generation_id=generation_id,
-                    data={"id": call_id, "result": result},
-                )
-
-            # 2f. 继续循环：LLM 下一轮会看到工具结果
+            elif state.next_step == NEXT_STEP_TOOLS:
+                # 2e. 逐个执行工具，把结果写回历史
+                tool_calls = state.pending_tool_calls
+                generation_id = state.last_generation_id
+                for tool_call in tool_calls:
+                    yield StreamEvent(
+                        type="tool_call",
+                        generation_id=generation_id,
+                        data={
+                            "name": tool_call["name"],
+                            "args": tool_call["args"],
+                            "id": tool_call["id"],
+                        },
+                    )
+                    result = await self._execute_tool_call(tool_call, state.tool_results)
+                    call_id = tool_call.get("id", "")
+                    self.session.add_tool(result, tool_call_id=call_id)
+                    yield StreamEvent(
+                        type="tool_result",
+                        generation_id=generation_id,
+                        data={"id": call_id, "result": result},
+                    )
+                # 一轮完成，回到 LLM 决策
+                state.iteration_count += 1
+                state.next_step = NEXT_STEP_LLM
 
         # 3. 超过最大步数，兜底返回
         fallback = f"已达到最大步数 {self.max_steps}，未能得到最终回复。"
