@@ -12,6 +12,7 @@
     --border: #e6e8eb;
     --accent: #3b82f6;
     --user-bg: #eef4ff;
+    --sidebar-bg: #fafbfc;
   }
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -28,9 +29,153 @@
 
   body {
     display: flex;
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  /* ===== 左侧边栏：技能管理 ===== */
+  .sidebar {
+    width: 280px;
+    flex-shrink: 0;
+    background: var(--sidebar-bg);
+    border-right: 1px solid var(--border);
+    display: flex;
     flex-direction: column;
-    max-width: 760px;
+    overflow: hidden;
+    transition: width .25s ease;
+  }
+  .sidebar.collapsed {
+    width: 0;
+    border-right: none;
+  }
+
+  .sidebar-header {
+    padding: 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+  }
+
+  .sidebar-header h2 {
+    font-size: 14px;
+    font-weight: 600;
+  }
+
+  .sidebar-toggle {
+    background: none;
+    border: none;
+    color: var(--muted);
+    cursor: pointer;
+    padding: 4px;
+    font-size: 14px;
+    border-radius: 4px;
+    line-height: 1;
+  }
+  .sidebar-toggle:hover { background: #e8eaed; color: var(--text); }
+
+  /* 折叠时的展开按钮 */
+  .sidebar-expand-btn {
+    display: none;
+    position: absolute;
+    top: 16px;
+    left: 16px;
+    z-index: 10;
+    background: var(--sidebar-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 10px;
+    cursor: pointer;
+    font-size: 16px;
+    color: var(--muted);
+  }
+  .sidebar-expand-btn:hover { background: #fff; color: var(--text); }
+  body.sidebar-collapsed .sidebar-expand-btn { display: block; }
+
+  .btn-add {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .btn-add:hover { background: #2f6fe0; }
+
+  .skills-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px;
+  }
+
+  .skill-card {
+    padding: 10px 12px;
+    border-radius: 8px;
+    margin-bottom: 6px;
+    background: #fff;
+    border: 1px solid var(--border);
+    cursor: pointer;
+    transition: border-color .15s;
+  }
+  .skill-card:hover { border-color: var(--accent); }
+
+  .skill-card-name {
+    font-weight: 600;
+    font-size: 13px;
+    color: var(--accent);
+    margin-bottom: 2px;
+  }
+  .skill-card-desc {
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.4;
+  }
+  .skill-tag {
+    display: inline-block;
+    font-size: 10px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    margin-left: 6px;
+    vertical-align: middle;
+  }
+  .skill-tag.builtin { background: #e0e7ff; color: #4338ca; }
+  .skill-tag.user { background: #dcfce7; color: #15803d; }
+  .skill-delete {
+    margin-top: 8px;
+    padding: 4px 10px;
+    border: 1px solid #fecaca;
+    background: #fef2f2;
+    color: #dc2626;
+    border-radius: 4px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .skill-delete:hover {
+    background: #fee2e2;
+  }
+  .skill-card-actions {
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  .empty-skills {
+    padding: 20px;
+    text-align: center;
+    color: var(--muted);
+    font-size: 13px;
+  }
+
+  /* ===== 右侧主区域 ===== */
+  .main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    max-width: 900px;
     margin: 0 auto;
+    width: 100%;
   }
 
   header {
@@ -131,7 +276,7 @@
   #stopBtn:hover:not(:disabled) { background: #dc2626; }
   #stopBtn:disabled { background: #cbd5e1; opacity: 1; cursor: not-allowed; }
 
-  /* 参数面板：默认收起 */
+  /* 参数面板 */
   .params {
     max-height: 0;
     overflow: hidden;
@@ -158,58 +303,265 @@
     text-align: right;
   }
   .field .val { min-width: 32px; text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
+
+  /* ===== 新增技能弹窗 ===== */
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    z-index: 100;
+    align-items: center;
+    justify-content: center;
+  }
+  .modal-overlay.open { display: flex; }
+
+  .modal {
+    background: #fff;
+    border-radius: 12px;
+    width: 560px;
+    max-width: 90vw;
+    max-height: 85vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .modal-header {
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .modal-header h3 { font-size: 15px; font-weight: 600; }
+
+  .modal-close {
+    background: none;
+    border: none;
+    font-size: 20px;
+    color: var(--muted);
+    cursor: pointer;
+    line-height: 1;
+  }
+
+  .modal-body {
+    padding: 16px 20px;
+    overflow-y: auto;
+  }
+
+  .form-group { margin-bottom: 14px; }
+  .form-group label {
+    display: block;
+    font-size: 13px;
+    font-weight: 500;
+    margin-bottom: 4px;
+    color: var(--text);
+  }
+  .form-group .hint {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+  .form-group input, .form-group textarea {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-family: inherit;
+    font-size: 13px;
+    outline: none;
+  }
+  .form-group input:focus, .form-group textarea:focus {
+    border-color: var(--accent);
+  }
+  .form-group textarea {
+    resize: vertical;
+    min-height: 120px;
+    line-height: 1.5;
+  }
+
+  .modal-footer {
+    padding: 12px 20px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+
+  .btn-cancel {
+    background: #f1f3f5;
+    color: var(--text);
+    border: none;
+    border-radius: 8px;
+    padding: 8px 16px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .btn-cancel:hover { background: #e4e6eb; }
+
+  .error-text {
+    color: #ef4444;
+    font-size: 12px;
+    margin-top: 8px;
+    display: none;
+  }
+  .error-text.show { display: block; }
+
+  /* 技能详情 */
+  .detail-name {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--accent);
+    margin-bottom: 4px;
+  }
+  .detail-desc {
+    font-size: 13px;
+    color: var(--muted);
+    margin-bottom: 16px;
+    line-height: 1.5;
+  }
+  .detail-section-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    margin-bottom: 6px;
+  }
+  .detail-instructions {
+    background: #f6f7f8;
+    border-radius: 8px;
+    padding: 12px;
+    font-size: 13px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 50vh;
+    overflow-y: auto;
+  }
 </style>
 </head>
 <body>
-  <header>
-    <h1>Apex Harness</h1>
-    <span class="status" id="status">就绪</span>
-  </header>
+  <!-- 折叠后的展开按钮 -->
+  <button class="sidebar-expand-btn" id="expandSidebar" title="展开技能面板">🧩</button>
 
-  <div id="messages"></div>
+  <!-- 左侧边栏：技能管理 -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <h2>🧩 技能</h2>
+      <div style="display:flex;gap:4px;align-items:center;">
+        <button class="btn-add" id="addSkillBtn">+ 新增</button>
+        <button class="sidebar-toggle" id="collapseSidebar" title="收起">◀</button>
+      </div>
+    </div>
+    <div class="skills-list" id="skillsList">
+      <div class="empty-skills">加载中…</div>
+    </div>
+  </aside>
 
-  <footer>
-    <div class="params" id="params">
-      <div class="params-inner">
-        <div class="field" style="grid-column: 1 / -1;">
-          <label>工作目录</label>
-          <input type="text" id="workspace" placeholder="/path/to/workspace" style="flex:1;padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:12px;">
-          <button class="send" id="setWorkspace" style="padding:6px 12px;font-size:12px;border-radius:6px;">设置</button>
+  <!-- 右侧主区域：聊天 -->
+  <div class="main">
+    <header>
+      <h1>Apex Harness</h1>
+      <span class="status" id="status">就绪</span>
+    </header>
+
+    <div id="messages"></div>
+
+    <footer>
+      <div class="params" id="params">
+        <div class="params-inner">
+          <div class="field" style="grid-column: 1 / -1;">
+            <label>工作目录</label>
+            <input type="text" id="workspace" placeholder="/path/to/workspace" style="flex:1;padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:12px;">
+            <button class="send" id="setWorkspace" style="padding:6px 12px;font-size:12px;border-radius:6px;">设置</button>
+          </div>
+          <div class="field">
+            <label>温度</label>
+            <input type="range" id="temperature" min="0" max="2" step="0.1" value="0.7">
+            <span class="val" id="temperatureVal">0.7</span>
+          </div>
+          <div class="field">
+            <label>Top P</label>
+            <input type="range" id="top_p" min="0" max="1" step="0.05" value="1">
+            <span class="val" id="top_pVal">1.0</span>
+          </div>
+          <div class="field">
+            <label>最大长度</label>
+            <input type="number" id="max_tokens" min="1" placeholder="不限">
+          </div>
+          <div class="field">
+            <label>频率惩罚</label>
+            <input type="range" id="frequency_penalty" min="-2" max="2" step="0.1" value="0">
+            <span class="val" id="frequency_penaltyVal">0.0</span>
+          </div>
+          <div class="field">
+            <label>存在惩罚</label>
+            <input type="range" id="presence_penalty" min="-2" max="2" step="0.1" value="0">
+            <span class="val" id="presence_penaltyVal">0.0</span>
+          </div>
         </div>
-        <div class="field">
-          <label>温度</label>
-          <input type="range" id="temperature" min="0" max="2" step="0.1" value="0.7">
-          <span class="val" id="temperatureVal">0.7</span>
+      </div>
+
+      <div class="input-row">
+        <button class="icon-btn" id="toggleParams" title="参数">⚙</button>
+        <textarea id="input" rows="1" placeholder="输入消息，回车发送，Shift+回车换行"></textarea>
+        <button class="send" id="send">发送</button>
+        <button class="send" id="stopBtn" disabled>停止</button>
+      </div>
+    </footer>
+  </div>
+
+  <!-- 新增技能弹窗 -->
+  <div class="modal-overlay" id="skillModal">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 id="modalTitle">新增技能</h3>
+        <button class="modal-close" id="closeModal">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>技能名称 *</label>
+          <input type="text" id="skillName" placeholder="如：translate_text">
+          <div class="hint">唯一标识，只能用小写字母、数字和下划线</div>
         </div>
-        <div class="field">
-          <label>Top P</label>
-          <input type="range" id="top_p" min="0" max="1" step="0.05" value="1">
-          <span class="val" id="top_pVal">1.0</span>
+        <div class="form-group">
+          <label>技能描述</label>
+          <input type="text" id="skillDesc" placeholder="一句话说明这个技能是做什么的">
+          <div class="hint">会展示给 LLM，影响它是否调用此技能</div>
         </div>
-        <div class="field">
-          <label>最大长度</label>
-          <input type="number" id="max_tokens" min="1" placeholder="不限">
+        <div class="form-group">
+          <label>技能指令</label>
+          <textarea id="skillInstructions" placeholder="详细说明：何时使用、如何使用、操作步骤..."></textarea>
+          <div class="hint">LLM 调用此技能时会收到这段指令</div>
         </div>
-        <div class="field">
-          <label>频率惩罚</label>
-          <input type="range" id="frequency_penalty" min="-2" max="2" step="0.1" value="0">
-          <span class="val" id="frequency_penaltyVal">0.0</span>
-        </div>
-        <div class="field">
-          <label>存在惩罚</label>
-          <input type="range" id="presence_penalty" min="-2" max="2" step="0.1" value="0">
-          <span class="val" id="presence_penaltyVal">0.0</span>
+        <div class="error-text" id="skillError"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-cancel" id="cancelSkill">取消</button>
+        <button class="send" id="saveSkill">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 技能详情弹窗 -->
+  <div class="modal-overlay" id="detailModal">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>技能详情</h3>
+        <button class="modal-close" id="closeDetail">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="detail-name" id="detailName"></div>
+        <div class="detail-desc" id="detailDesc"></div>
+        <div class="detail-section-title">指令</div>
+        <div class="detail-instructions" id="detailInstructions"></div>
+        <div class="modal-footer" id="detailFooter" style="display:none;margin-top:16px;">
+          <button class="send" id="editSkillBtn" style="margin-left:auto;">编辑</button>
         </div>
       </div>
     </div>
-
-    <div class="input-row">
-      <button class="icon-btn" id="toggleParams" title="参数">⚙</button>
-      <textarea id="input" rows="1" placeholder="输入消息，回车发送，Shift+回车换行"></textarea>
-      <button class="send" id="send">发送</button>
-      <button class="send" id="stopBtn" disabled>停止</button>
-    </div>
-  </footer>
+  </div>
 
 <script>
   const messagesEl = document.getElementById('messages');
@@ -225,13 +577,13 @@
     const el = document.getElementById(id);
     const valEl = document.getElementById(id + 'Val');
     el.addEventListener('input', () => {
-      valEl.textContent = parseFloat(el.value).toFixed(id === 'temperature' || id === 'top_p' ? 1 : 1);
+      valEl.textContent = parseFloat(el.value).toFixed(1);
     });
   });
 
   toggleParamsBtn.addEventListener('click', () => paramsEl.classList.toggle('open'));
 
-  // 工作目录：加载当前值 + 设置
+  // 工作目录
   const workspaceInput = document.getElementById('workspace');
   const setWorkspaceBtn = document.getElementById('setWorkspace');
 
@@ -243,26 +595,6 @@
     } catch (e) {}
   }
   loadWorkspace();
-
-  // 页面加载时恢复历史消息
-  async function loadHistory() {
-    try {
-      const res = await fetch('/api/messages');
-      const messages = await res.json();
-      for (const m of messages) {
-        const type = m.type;
-        const content = (m.data && m.data.content) || '';
-        if (!content) continue;
-        if (type === 'human') {
-          addMessage('user', content);
-        } else if (type === 'ai') {
-          addMessage('assistant', content);
-        }
-        // system / tool 消息不展示
-      }
-    } catch (e) {}
-  }
-  loadHistory();
 
   setWorkspaceBtn.addEventListener('click', async () => {
     const path = workspaceInput.value.trim();
@@ -288,6 +620,232 @@
     } finally {
       setWorkspaceBtn.disabled = false;
       setWorkspaceBtn.textContent = '设置';
+    }
+  });
+
+  // 恢复历史消息
+  async function loadHistory() {
+    try {
+      const res = await fetch('/api/messages');
+      const messages = await res.json();
+      for (const m of messages) {
+        const type = m.type;
+        const content = (m.data && m.data.content) || '';
+        if (!content) continue;
+        if (type === 'human') {
+          addMessage('user', content);
+        } else if (type === 'ai') {
+          addMessage('assistant', content);
+        }
+      }
+    } catch (e) {}
+  }
+  loadHistory();
+
+  // ===== 技能管理 =====
+  const skillsList = document.getElementById('skillsList');
+  const addSkillBtn = document.getElementById('addSkillBtn');
+  const skillModal = document.getElementById('skillModal');
+  const closeModal = document.getElementById('closeModal');
+  const cancelSkill = document.getElementById('cancelSkill');
+  const saveSkill = document.getElementById('saveSkill');
+  const skillError = document.getElementById('skillError');
+
+  loadSkills();
+
+  // 侧边栏折叠/展开
+  const sidebar = document.getElementById('sidebar');
+  const collapseSidebarBtn = document.getElementById('collapseSidebar');
+  const expandSidebarBtn = document.getElementById('expandSidebar');
+
+  function collapseSidebar() {
+    sidebar.classList.add('collapsed');
+    document.body.classList.add('sidebar-collapsed');
+  }
+  function expandSidebar() {
+    sidebar.classList.remove('collapsed');
+    document.body.classList.remove('sidebar-collapsed');
+  }
+  collapseSidebarBtn.addEventListener('click', collapseSidebar);
+  expandSidebarBtn.addEventListener('click', expandSidebar);
+
+  // 技能详情弹窗
+  const detailModal = document.getElementById('detailModal');
+  const closeDetail = document.getElementById('closeDetail');
+  const editSkillBtn = document.getElementById('editSkillBtn');
+  const detailFooter = document.getElementById('detailFooter');
+  let currentDetailData = null;
+
+  async function showSkillDetail(name) {
+    try {
+      const res = await fetch('/api/skills/' + encodeURIComponent(name));
+      if (!res.ok) {
+        alert('加载技能详情失败');
+        return;
+      }
+      const data = await res.json();
+      currentDetailData = data;
+      document.getElementById('detailName').textContent = data.name;
+      document.getElementById('detailDesc').textContent = data.description || '(无描述)';
+      document.getElementById('detailInstructions').textContent = data.instructions || '(无指令)';
+      // 仅用户技能显示编辑按钮
+      const isBuiltin = _isBuiltinSkill(data.name);
+      detailFooter.style.display = isBuiltin ? 'none' : 'flex';
+      detailModal.classList.add('open');
+    } catch (e) {
+      alert('加载失败：' + e.message);
+    }
+  }
+
+  function _isBuiltinSkill(name) {
+    // 通过卡片上的 data-builtin 判断
+    const card = skillsList.querySelector(`.skill-card[data-name="${name}"]`);
+    return card ? card.dataset.builtin === 'true' : false;
+  }
+
+  editSkillBtn.addEventListener('click', () => {
+    if (!currentDetailData) return;
+    editingSkillName = currentDetailData.name;
+    document.getElementById('modalTitle').textContent = '编辑技能';
+    document.getElementById('skillName').value = currentDetailData.name;
+    document.getElementById('skillName').disabled = true;
+    document.getElementById('skillDesc').value = currentDetailData.description || '';
+    document.getElementById('skillInstructions').value = currentDetailData.instructions || '';
+    skillError.classList.remove('show');
+    detailModal.classList.remove('open');
+    skillModal.classList.add('open');
+  });
+
+  closeDetail.addEventListener('click', () => detailModal.classList.remove('open'));
+  detailModal.addEventListener('click', (e) => {
+    if (e.target === detailModal) detailModal.classList.remove('open');
+  });
+
+  // 技能卡片渲染时绑定点击事件
+  function renderSkills(skills) {
+    if (!skills.length) {
+      skillsList.innerHTML = '<div class="empty-skills">暂无技能，点击右上角 + 新增</div>';
+      return;
+    }
+    skillsList.innerHTML = skills.map(s =>
+      `<div class="skill-card" data-name="${s.name}" data-builtin="${s.is_builtin}" title="点击查看详情">
+        <div class="skill-card-name">
+          ${s.name}
+          ${s.is_builtin ? '<span class="skill-tag builtin">内置</span>' : '<span class="skill-tag user">自定义</span>'}
+        </div>
+        <div class="skill-card-desc">${s.description || '(无描述)'}</div>
+        ${!s.is_builtin ? '<div class="skill-card-actions"><button class="skill-delete" data-name="' + s.name + '">删除</button></div>' : ''}
+      </div>`
+    ).join('');
+    // 绑定点击事件
+    skillsList.querySelectorAll('.skill-card').forEach(card => {
+      card.addEventListener('click', () => showSkillDetail(card.dataset.name));
+    });
+    // 绑定删除按钮（阻止冒泡）
+    skillsList.querySelectorAll('.skill-delete').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        deleteSkill(btn.dataset.name);
+      });
+    });
+  }
+
+  async function deleteSkill(name) {
+    if (!confirm(`确定删除技能「${name}」吗？此操作不可撤销。`)) return;
+    try {
+      const res = await fetch('/api/skills/' + encodeURIComponent(name), { method: 'DELETE' });
+      const data = await res.json();
+      if (res.ok) {
+        await loadSkills();
+        statusEl.textContent = `技能 ${name} 已删除`;
+        setTimeout(() => { statusEl.textContent = '就绪'; }, 2000);
+      } else {
+        alert(data.detail || '删除失败');
+      }
+    } catch (e) {
+      alert('删除失败：' + e.message);
+    }
+  }
+
+  // 重写 loadSkills 使用 renderSkills
+  async function loadSkills() {
+    try {
+      const res = await fetch('/api/skills');
+      const skills = await res.json();
+      renderSkills(skills);
+    } catch (e) {
+      skillsList.innerHTML = '<div class="empty-skills">加载失败</div>';
+    }
+  }
+
+  let editingSkillName = null;
+
+  addSkillBtn.addEventListener('click', () => {
+    editingSkillName = null;
+    document.getElementById('modalTitle').textContent = '新增技能';
+    document.getElementById('skillName').value = '';
+    document.getElementById('skillName').disabled = false;
+    document.getElementById('skillDesc').value = '';
+    document.getElementById('skillInstructions').value = '';
+    skillError.classList.remove('show');
+    skillModal.classList.add('open');
+  });
+
+  closeModal.addEventListener('click', () => skillModal.classList.remove('open'));
+  cancelSkill.addEventListener('click', () => skillModal.classList.remove('open'));
+  skillModal.addEventListener('click', (e) => {
+    if (e.target === skillModal) skillModal.classList.remove('open');
+  });
+
+  saveSkill.addEventListener('click', async () => {
+    const name = document.getElementById('skillName').value.trim();
+    const description = document.getElementById('skillDesc').value.trim();
+    const instructions = document.getElementById('skillInstructions').value.trim();
+
+    skillError.classList.remove('show');
+
+    if (!name) {
+      skillError.textContent = '请填写技能名称';
+      skillError.classList.add('show');
+      return;
+    }
+    if (!/^[a-z0-9_]+$/.test(name)) {
+      skillError.textContent = '技能名称只能包含小写字母、数字和下划线';
+      skillError.classList.add('show');
+      return;
+    }
+
+    saveSkill.disabled = true;
+    saveSkill.textContent = '保存中…';
+
+    try {
+      // 编辑模式：PUT；新建模式：POST
+      const url = editingSkillName
+        ? `/api/skills/${encodeURIComponent(editingSkillName)}`
+        : '/api/skills';
+      const method = editingSkillName ? 'PUT' : 'POST';
+
+      const res = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, description, instructions }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        skillModal.classList.remove('open');
+        await loadSkills();
+        statusEl.textContent = `技能 ${name} 已${editingSkillName ? '更新' : '创建'}`;
+        setTimeout(() => { statusEl.textContent = '就绪'; }, 2000);
+      } else {
+        skillError.textContent = data.detail || '保存失败';
+        skillError.classList.add('show');
+      }
+    } catch (e) {
+      skillError.textContent = '网络错误：' + e.message;
+      skillError.classList.add('show');
+    } finally {
+      saveSkill.disabled = false;
+      saveSkill.textContent = '保存';
     }
   });
 
@@ -349,7 +907,6 @@
       if (closed) return;
       closed = true;
       if (es) es.close();
-      // 通知后端取消后台生成任务；cancelled 事件会持久化，供回放。
       if (taskId) {
         fetch('/tasks/' + taskId + '/cancel', { method: 'POST' }).catch(() => {});
       }
@@ -362,7 +919,6 @@
     stopBtn.onclick = stop;
 
     try {
-      // 1. 提交消息，拿到 task_id（生成在后台进行，与连接解耦）
       const res = await fetch('/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -381,9 +937,7 @@
       const data = await res.json();
       taskId = data.task_id;
 
-      // 2. 订阅事件流；EventSource 断线会自动重连并带上 Last-Event-ID 补发
       es = new EventSource('/events/' + taskId);
-      // 按 generation_id 分组缓存文本，支持中断重跑时回退（丢弃失败轮）。
       const genText = {};
       const genOrder = [];
       const failedGens = new Set();
@@ -391,7 +945,7 @@
       let renderedLen = 0;
       let rafId = null;
       let lastTypeTs = null;
-      const TYPE_SPEED = 30; // 固定打字速度：字/秒
+      const TYPE_SPEED = 30;
 
       function currentTarget() {
         let out = '';
@@ -418,7 +972,6 @@
         }
         if (lastTypeTs == null) lastTypeTs = ts;
         const dt = Math.max(0, ts - lastTypeTs);
-        // 固定速度逐字推进，与文本长度无关，保证长任务也有打字机效果
         const step = Math.max(1, Math.round((dt / 1000) * TYPE_SPEED));
         renderedLen = Math.min(renderedLen + step, target.length);
         lastTypeTs = ts;
@@ -430,7 +983,6 @@
 
       function render(immediate) {
         const target = currentTarget();
-        // 回退（generation_failed）：目标变短时重置已显示长度
         if (renderedLen > target.length) renderedLen = 0;
         stopTyping();
         lastTypeTs = null;
@@ -457,7 +1009,6 @@
           }
           render();
         } else if (ev.type === 'generation_failed') {
-          // 本轮未完成，丢弃该 generation 的半截文本。
           failedGens.add(gid);
           render();
         }
@@ -482,7 +1033,6 @@
       };
 
       es.onerror = () => {
-        // 网络断开时 EventSource 会自动重连；这里只提示，不结束。
         if (!closed) statusEl.textContent = '连接中断，重连中…';
       };
     } catch (err) {

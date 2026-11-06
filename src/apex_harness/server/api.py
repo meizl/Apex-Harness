@@ -36,7 +36,14 @@ from apex_harness.llm.openai import OpenAIProvider
 from apex_harness.server.tasks import TaskManager
 from apex_harness.session.checkpoint import load_checkpoint, save_checkpoint
 from apex_harness.session.session import Session
-from apex_harness.skills import SkillRegistryPlugin, load_builtin_skills, load_skills_from_dir
+from apex_harness.skills import (
+    USER_SKILLS_DIR,
+    SkillMetadata,
+    SkillRegistryPlugin,
+    load_builtin_skills,
+    load_skills_from_dir,
+)
+from apex_harness.skills.parser import parse_skill_md
 from apex_harness.storage.local import LocalEventStore
 from apex_harness.tools.filesystem import (
     DeleteFileTool,
@@ -54,6 +61,27 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 WEB_DIR = PROJECT_ROOT / "web"
 # 会话 checkpoint 目录：按 workspace hash 隔离存储
 SESSIONS_DIR = PROJECT_ROOT / "sessions"
+
+
+def build_system_prompt(apex_md: str, skills_metadata: list[SkillMetadata]) -> str:
+    """构建系统提示：Apex.md + 可用技能摘要列表。
+
+    渐进式披露：只注入技能的 name + description，不注入完整 instructions。
+    完整指令在 LLM 调用该技能时由 SkillToolAdapter 返回。
+    """
+    parts: list[str] = []
+    if apex_md:
+        parts.append(apex_md)
+
+    if skills_metadata:
+        skill_lines = ["## 可用技能", "", "你可以使用以下技能（通过函数调用激活）："]
+        for m in skills_metadata:
+            skill_lines.append(f"- `{m.name}`：{m.description}")
+        skill_lines.append("")
+        skill_lines.append("当用户询问你有哪些技能或能力时，请列出以上技能。")
+        parts.append("\n".join(skill_lines))
+
+    return "\n\n".join(parts)
 
 
 def _load_dotenv(path: Path) -> None:
@@ -126,21 +154,24 @@ async def lifespan(app: FastAPI):
     if apex_md_path.exists():
         apex_md = apex_md_path.read_text(encoding="utf-8")
 
+    # 系统提示 = Apex.md + 可用技能摘要（渐进式披露，不含完整 instructions）
+    system_prompt = build_system_prompt(apex_md, skills_metadata)
+
     # 从 checkpoint 恢复会话（按 workspace hash 隔离）；不存在则新建
     session = load_checkpoint(SESSIONS_DIR, workspace_dir)
     if session is None:
         session = Session()
-        if apex_md:
-            session.add_system(apex_md)
+        if system_prompt:
+            session.add_system(system_prompt)
     else:
-        # 恢复后同步最新 Apex.md 到第一条 system 消息
+        # 恢复后同步最新系统提示（Apex.md 或技能列表可能变了）
         if session.messages and session.messages[0].type == "system":
-            if apex_md:
-                session.messages[0] = SystemMessage(content=apex_md)
+            if system_prompt:
+                session.messages[0] = SystemMessage(content=system_prompt)
             else:
                 session.messages.pop(0)
-        elif apex_md:
-            session.messages.insert(0, SystemMessage(content=apex_md))
+        elif system_prompt:
+            session.messages.insert(0, SystemMessage(content=system_prompt))
 
     orch = Orchestrator(session, llm, tools=registry.all)
 
@@ -152,6 +183,7 @@ async def lifespan(app: FastAPI):
     app.state.kernel = kernel
     app.state.orchestrator = orch
     app.state.registry = registry
+    app.state.skills_metadata = skills_metadata
     app.state.workspace_dir = workspace_dir
     app.state.apex_md = apex_md
     app.state.tasks = tasks
@@ -208,19 +240,23 @@ async def set_workspace(req: WorkspaceRequest) -> dict[str, str]:
     llm = app.state.kernel.services.require("llm")
     registry = app.state.kernel.services.require("tools")
 
+    # 系统提示 = Apex.md + 可用技能摘要
+    skills_metadata = app.state.skills_metadata
+    system_prompt = build_system_prompt(apex_md, skills_metadata)
+
     session = load_checkpoint(SESSIONS_DIR, str(new_dir))
     if session is None:
         session = Session()
-        if apex_md:
-            session.add_system(apex_md)
+        if system_prompt:
+            session.add_system(system_prompt)
     else:
         if session.messages and session.messages[0].type == "system":
-            if apex_md:
-                session.messages[0] = SystemMessage(content=apex_md)
+            if system_prompt:
+                session.messages[0] = SystemMessage(content=system_prompt)
             else:
                 session.messages.pop(0)
-        elif apex_md:
-            session.messages.insert(0, SystemMessage(content=apex_md))
+        elif system_prompt:
+            session.messages.insert(0, SystemMessage(content=system_prompt))
 
     app.state.workspace_dir = str(new_dir)
     app.state.apex_md = apex_md
@@ -239,6 +275,203 @@ async def get_messages() -> list[dict[str, Any]]:
     """返回当前会话的所有消息，供前端刷新后恢复展示。"""
     session: Session = app.state.orchestrator.session
     return [message_to_dict(m) for m in session.messages]
+
+
+@app.get("/api/skills")
+async def get_skills() -> list[dict[str, Any]]:
+    """返回当前可用的技能列表（name + description + 是否内置）。"""
+    skills: list[SkillMetadata] = app.state.skills_metadata
+    result = []
+    for m in skills:
+        is_builtin = not _is_user_skill(m.name)
+        result.append({"name": m.name, "description": m.description, "is_builtin": is_builtin})
+    return result
+
+
+@app.get("/api/skills/{skill_name}")
+async def get_skill_detail(skill_name: str) -> dict[str, str]:
+    """返回指定技能的完整信息（含 instructions）。"""
+    skill_registry = app.state.kernel.services.require("skills")
+    meta = skill_registry.get(skill_name)
+    if meta is None:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail=f"技能 {skill_name} 不存在")
+    return {
+        "name": meta.name,
+        "description": meta.description,
+        "instructions": meta.instructions,
+    }
+
+
+class SkillCreateRequest(BaseModel):
+    """新增技能请求：可传完整 content，或分字段传入。"""
+    name: str = ""
+    description: str = ""
+    instructions: str = ""
+    content: str = ""  # 完整 SKILL.md 文本，优先级高于分字段
+
+
+@app.post("/api/skills")
+async def create_skill(req: SkillCreateRequest) -> dict[str, Any]:
+    """新增一个技能：校验格式 → 保存到用户技能目录 → 热加载到注册表。"""
+    # 1. 组装 SKILL.md 内容
+    if req.content.strip():
+        content = req.content
+    else:
+        if not req.name.strip():
+            from fastapi import HTTPException
+            raise HTTPException(status_code=400, detail="技能名称 name 不能为空")
+        content = f"---\nname: {req.name}\ndescription: {req.description}\n---\n\n{req.instructions}\n"
+
+    # 2. 校验格式
+    try:
+        parsed = parse_skill_md(content)
+    except ValueError as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=f"格式错误：{e}")
+
+    if not parsed.name.strip():
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="格式错误：frontmatter 缺少必填字段 name")
+
+    # 3. 保存到用户技能目录
+    skill_dir = USER_SKILLS_DIR / parsed.name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
+
+    # 4. 热加载：注册到 SkillRegistry + ToolRegistry，更新 Orchestrator 的 tools
+    metadata = SkillMetadata(
+        name=parsed.name,
+        description=parsed.description,
+        instructions=parsed.instructions,
+    )
+
+    from apex_harness.skills.adapter import SkillToolAdapter
+
+    skill_registry = app.state.kernel.services.require("skills")
+    tool_registry = app.state.kernel.services.require("tools")
+
+    # 注册到技能注册表
+    skill_registry.register(metadata)
+    # 注册为工具（LLM 可调用）
+    tool_registry.register(SkillToolAdapter(metadata))
+
+    # 更新 app.state 的技能列表
+    existing_names = {m.name for m in app.state.skills_metadata}
+    if parsed.name not in existing_names:
+        app.state.skills_metadata.append(metadata)
+
+    # 更新 Orchestrator 的 tools 字典，让新技能立即生效
+    orch: Orchestrator = app.state.orchestrator
+    orch.react.tools[metadata.name] = SkillToolAdapter(metadata)
+
+    return {
+        "name": parsed.name,
+        "description": parsed.description,
+        "message": f"技能 {parsed.name} 已创建并加载",
+    }
+
+
+def _get_user_skill_path(skill_name: str) -> Path:
+    """返回用户技能目录下指定技能的 SKILL.md 路径。"""
+    return USER_SKILLS_DIR / skill_name / "SKILL.md"
+
+
+def _is_user_skill(skill_name: str) -> bool:
+    """判断技能是否为用户创建（文件在 user/ 目录下）。"""
+    return _get_user_skill_path(skill_name).exists()
+
+
+@app.delete("/api/skills/{skill_name}")
+async def delete_skill(skill_name: str) -> dict[str, Any]:
+    """删除用户技能：移除文件 + 从注册表卸载。
+
+    内置技能（builtins/）不允许删除。
+    """
+    from fastapi import HTTPException
+    from apex_harness.skills.adapter import SkillToolAdapter
+
+    if not _is_user_skill(skill_name):
+        raise HTTPException(status_code=403, detail=f"技能 {skill_name} 是内置技能，不允许删除")
+
+    skill_path = _get_user_skill_path(skill_name)
+    skill_dir = skill_path.parent
+
+    # 1. 删除文件
+    import shutil
+    shutil.rmtree(skill_dir, ignore_errors=True)
+
+    # 2. 从注册表卸载
+    skill_registry = app.state.kernel.services.require("skills")
+    tool_registry = app.state.kernel.services.require("tools")
+    skill_registry.remove(skill_name)
+    tool_registry.remove(skill_name)
+
+    # 3. 从 app.state 技能列表移除
+    app.state.skills_metadata = [m for m in app.state.skills_metadata if m.name != skill_name]
+
+    # 4. 从 Orchestrator 的 tools 移除
+    orch: Orchestrator = app.state.orchestrator
+    orch.react.tools.pop(skill_name, None)
+
+    return {"message": f"技能 {skill_name} 已删除"}
+
+
+@app.put("/api/skills/{skill_name}")
+async def update_skill(skill_name: str, req: SkillCreateRequest) -> dict[str, Any]:
+    """更新用户技能：校验格式 → 覆盖文件 → 热更新注册表。"""
+    from fastapi import HTTPException
+    from apex_harness.skills.adapter import SkillToolAdapter
+
+    if not _is_user_skill(skill_name):
+        raise HTTPException(status_code=403, detail=f"技能 {skill_name} 是内置技能，不允许修改")
+
+    # 1. 组装内容（name 锁定为路径中的 skill_name，防止改名）
+    if req.content.strip():
+        content = req.content
+    else:
+        content = f"---\nname: {skill_name}\ndescription: {req.description}\n---\n\n{req.instructions}\n"
+
+    # 2. 校验格式
+    try:
+        parsed = parse_skill_md(content)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"格式错误：{e}")
+
+    if parsed.name != skill_name:
+        raise HTTPException(status_code=400, detail="name 字段与路径不一致，不允许改名")
+
+    # 3. 覆盖文件
+    skill_path = _get_user_skill_path(skill_name)
+    skill_path.write_text(content, encoding="utf-8")
+
+    # 4. 热更新注册表
+    metadata = SkillMetadata(
+        name=parsed.name,
+        description=parsed.description,
+        instructions=parsed.instructions,
+    )
+
+    skill_registry = app.state.kernel.services.require("skills")
+    tool_registry = app.state.kernel.services.require("tools")
+
+    skill_registry.register(metadata)  # register 会覆盖同名
+    tool_registry.remove(skill_name)
+    tool_registry.register(SkillToolAdapter(metadata))
+
+    # 更新 app.state
+    app.state.skills_metadata = [m for m in app.state.skills_metadata if m.name != skill_name]
+    app.state.skills_metadata.append(metadata)
+
+    # 更新 Orchestrator tools
+    orch: Orchestrator = app.state.orchestrator
+    orch.react.tools[skill_name] = SkillToolAdapter(metadata)
+
+    return {
+        "name": parsed.name,
+        "description": parsed.description,
+        "message": f"技能 {parsed.name} 已更新",
+    }
 
 
 @app.post("/chat")

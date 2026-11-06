@@ -28,6 +28,10 @@ class SkillRegistry:
             raise ValueError("SkillMetadata 缺少 name")
         self._metadatas[metadata.name] = metadata
 
+    def remove(self, name: str) -> None:
+        """按名字移除技能元数据，不存在则静默忽略。"""
+        self._metadatas.pop(name, None)
+
     def get(self, name: str) -> SkillMetadata | None:
         """按名字获取元数据，不存在返回 None。"""
         return self._metadatas.get(name)

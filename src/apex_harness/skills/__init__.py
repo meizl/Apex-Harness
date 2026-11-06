@@ -14,11 +14,19 @@ from .registry import SkillRegistry, SkillRegistryPlugin
 
 # 内置技能目录（随框架发布的 SKILL.md）
 BUILTIN_SKILLS_DIR = Path(__file__).parent / "builtins"
+# 用户自定义技能目录（用户通过前端新增的技能保存在这里）
+USER_SKILLS_DIR = Path(__file__).parent / "user"
 
 
 def load_builtin_skills() -> list[SkillMetadata]:
-    """加载内置技能。"""
-    return load_skills_from_dir(BUILTIN_SKILLS_DIR)
+    """加载内置技能 + 用户自定义技能（用户技能优先级更高，同名覆盖内置）。"""
+    builtins = load_skills_from_dir(BUILTIN_SKILLS_DIR)
+    users = load_skills_from_dir(USER_SKILLS_DIR)
+    # 用户技能覆盖同名内置技能
+    user_names = {m.name for m in users}
+    result = [m for m in builtins if m.name not in user_names]
+    result.extend(users)
+    return result
 
 
 __all__ = [
@@ -32,4 +40,5 @@ __all__ = [
     "parse_skill_md",
     "load_builtin_skills",
     "BUILTIN_SKILLS_DIR",
+    "USER_SKILLS_DIR",
 ]

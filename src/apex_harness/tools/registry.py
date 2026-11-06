@@ -35,6 +35,10 @@ class ToolRegistry:
             raise ValueError(f"Tool {type(tool).__name__} 缺少 name 属性")
         self._tools[tool.name] = tool
 
+    def remove(self, name: str) -> None:
+        """按名字移除工具，不存在则静默忽略。"""
+        self._tools.pop(name, None)
+
     def get(self, name: str) -> Tool | None:
         """按名字获取工具，不存在返回 None。"""
         return self._tools.get(name)

@@ -53,6 +53,8 @@ Thumbs.db
 .events/
 sessions/
 tmp/
+# 用户自定义技能（前端创建，不随项目发布）
+src/apex_harness/skills/user/
 
 # Secrets
 .env
