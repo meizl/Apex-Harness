@@ -99,3 +99,23 @@ class EvolutionResult(BaseModel):
     decision: EvolutionDecision
     skill_entry: Optional[SkillEntry] = None
     similarity_scores: list[float] = Field(default_factory=list)
+    pending_skill: Optional["PendingSkill"] = None
+
+
+# --------------------------------------------------------------------------- #
+# 待审批候选
+# --------------------------------------------------------------------------- #
+
+
+class PendingSkill(BaseModel):
+    """等待用户审批的候选 Skill。
+
+    右循环提取候选并决策为 Add/Merge 后，不直接写入 SkillBank，而是进入
+    待审批队列，由用户查看、修改后决定通过或拒绝。
+    """
+
+    pending_id: str
+    candidate: CandidateSkill
+    decision: EvolutionDecision
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    status: str = "pending"  # pending | approved | rejected

@@ -14,8 +14,10 @@ from .models import (
     EvolutionAction,
     EvolutionDecision,
     EvolutionResult,
+    PendingSkill,
     SkillEntry,
 )
+from .pending_store import PendingSkillStore
 from .retriever import SkillBankRetriever
 from .worker import SkillEvolutionWorker
 from .writer import SkillBankWriter
@@ -33,5 +35,7 @@ __all__ = [
     "EvolutionAction",
     "EvolutionDecision",
     "EvolutionResult",
+    "PendingSkill",
+    "PendingSkillStore",
     "SkillEntry",
 ]

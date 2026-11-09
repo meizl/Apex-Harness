@@ -104,10 +104,31 @@
   }
   .btn-add:hover { background: #2f6fe0; }
 
-  .skills-list {
+  .skills-list, .pending-list {
     flex: 1;
     overflow-y: auto;
     padding: 8px;
+  }
+
+  .sidebar-tabs {
+    display: flex;
+    border-bottom: 1px solid var(--border);
+    padding: 0 8px;
+  }
+  .tab-btn {
+    flex: 1;
+    padding: 8px 0;
+    border: none;
+    background: none;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--muted);
+    border-bottom: 2px solid transparent;
+  }
+  .tab-btn.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+    font-weight: 600;
   }
 
   .skill-card {
@@ -159,6 +180,51 @@
     display: flex;
     justify-content: flex-end;
   }
+
+  /* 待审批卡片 */
+  .pending-card {
+    padding: 10px 12px;
+    border-radius: 8px;
+    margin-bottom: 6px;
+    background: #fffbeb;
+    border: 1px solid #fde68a;
+    cursor: pointer;
+    transition: border-color .15s;
+  }
+  .pending-card:hover { border-color: #f59e0b; }
+  .pending-card-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: #92400e;
+    margin-bottom: 2px;
+  }
+  .pending-card-desc {
+    font-size: 11px;
+    color: var(--muted);
+    line-height: 1.4;
+  }
+  .pending-card-meta {
+    font-size: 10px;
+    color: #b45309;
+    margin-top: 4px;
+  }
+  .pending-card-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 8px;
+  }
+  .pending-card-actions button {
+    flex: 1;
+    padding: 4px 0;
+    border: none;
+    border-radius: 4px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .btn-approve { background: #dcfce7; color: #15803d; }
+  .btn-approve:hover { background: #bbf7d0; }
+  .btn-reject { background: #fee2e2; color: #dc2626; }
+  .btn-reject:hover { background: #fecaca; }
 
   .empty-skills {
     padding: 20px;
@@ -454,7 +520,14 @@
         <button class="sidebar-toggle" id="collapseSidebar" title="收起">◀</button>
       </div>
     </div>
+    <div class="sidebar-tabs">
+      <button class="tab-btn active" data-tab="skills">技能</button>
+      <button class="tab-btn" data-tab="pending">待审批</button>
+    </div>
     <div class="skills-list" id="skillsList">
+      <div class="empty-skills">加载中…</div>
+    </div>
+    <div class="pending-list" id="pendingList" style="display:none;">
       <div class="empty-skills">加载中…</div>
     </div>
   </aside>
@@ -559,6 +632,36 @@
         <div class="modal-footer" id="detailFooter" style="display:none;margin-top:16px;">
           <button class="send" id="editSkillBtn" style="margin-left:auto;">编辑</button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 待审批详情/编辑弹窗 -->
+  <div class="modal-overlay" id="pendingModal">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>审批候选技能</h3>
+        <button class="modal-close" id="closePending">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>技能名称</label>
+          <input type="text" id="pendingName" placeholder="my_skill">
+        </div>
+        <div class="form-group">
+          <label>描述</label>
+          <input type="text" id="pendingDesc" placeholder="一句话描述">
+        </div>
+        <div class="form-group">
+          <label>指令</label>
+          <textarea id="pendingInstruction" rows="8" placeholder="技能的完整指令，调用时注入 LLM"></textarea>
+        </div>
+        <div id="pendingMeta" style="font-size:11px;color:var(--muted);margin-top:8px;"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-cancel" id="rejectPending">拒绝</button>
+        <button class="btn-cancel" id="closePending2">取消</button>
+        <button class="send" id="approvePending">通过</button>
       </div>
     </div>
   </div>
@@ -777,6 +880,174 @@
       skillsList.innerHTML = '<div class="empty-skills">加载失败</div>';
     }
   }
+
+  // ---- Tab 切换 ----
+  const tabBtns = document.querySelectorAll('.tab-btn');
+  const skillsListEl = document.getElementById('skillsList');
+  const pendingListEl = document.getElementById('pendingList');
+
+  tabBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      tabBtns.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const tab = btn.dataset.tab;
+      if (tab === 'skills') {
+        skillsListEl.style.display = '';
+        pendingListEl.style.display = 'none';
+      } else {
+        skillsListEl.style.display = 'none';
+        pendingListEl.style.display = '';
+        loadPendingSkills();
+      }
+    });
+  });
+
+  // ---- 待审批列表 ----
+  let currentPendingId = null;
+
+  async function loadPendingSkills() {
+    try {
+      const res = await fetch('/api/skills/pending');
+      const items = await res.json();
+      renderPending(items);
+    } catch (e) {
+      pendingListEl.innerHTML = '<div class="empty-skills">加载失败</div>';
+    }
+  }
+
+  function renderPending(items) {
+    if (!items.length) {
+      pendingListEl.innerHTML = '<div class="empty-skills">暂无待审批技能</div>';
+      return;
+    }
+    pendingListEl.innerHTML = items.map(p =>
+      `<div class="pending-card" data-id="${p.pending_id}">
+        <div class="pending-card-name">${p.name}</div>
+        <div class="pending-card-desc">${p.description || '(无描述)'}</div>
+        <div class="pending-card-meta">${p.action} · 置信度 ${(p.confidence_score * 100).toFixed(0)}%</div>
+        <div class="pending-card-actions">
+          <button class="btn-approve" data-id="${p.pending_id}">通过</button>
+          <button class="btn-reject" data-id="${p.pending_id}">拒绝</button>
+        </div>
+      </div>`
+    ).join('');
+    // 点击卡片打开编辑
+    pendingListEl.querySelectorAll('.pending-card').forEach(card => {
+      card.addEventListener('click', (e) => {
+        if (e.target.tagName === 'BUTTON') return;
+        openPendingDetail(card.dataset.id);
+      });
+    });
+    // 快捷通过/拒绝
+    pendingListEl.querySelectorAll('.btn-approve').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        approvePending(btn.dataset.id);
+      });
+    });
+    pendingListEl.querySelectorAll('.btn-reject').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        rejectPending(btn.dataset.id);
+      });
+    });
+  }
+
+  async function openPendingDetail(pendingId) {
+    try {
+      // 从列表数据里找，或重新拉取。这里重新拉取详情
+      const res = await fetch('/api/skills/pending');
+      const items = await res.json();
+      const p = items.find(x => x.pending_id === pendingId);
+      if (!p) { alert('待审批技能不存在'); return; }
+      currentPendingId = pendingId;
+      document.getElementById('pendingName').value = p.name;
+      document.getElementById('pendingDesc').value = p.description || '';
+      document.getElementById('pendingInstruction').value = p.instruction || '';
+      document.getElementById('pendingMeta').textContent =
+        `动作: ${p.action} · 来源: ${p.source_trace_id} · 置信度: ${(p.confidence_score * 100).toFixed(0)}%`;
+      document.getElementById('pendingModal').classList.add('open');
+    } catch (e) {
+      alert('加载失败：' + e.message);
+    }
+  }
+
+  // 先保存修改，再通过
+  async function approvePending(pendingId) {
+    // 如果是从弹窗通过，先保存修改
+    if (currentPendingId === pendingId) {
+      const name = document.getElementById('pendingName').value.trim();
+      const description = document.getElementById('pendingDesc').value.trim();
+      const instruction = document.getElementById('pendingInstruction').value.trim();
+      try {
+        await fetch('/api/skills/pending/' + encodeURIComponent(pendingId), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, description, instruction }),
+        });
+      } catch (e) {
+        alert('保存修改失败：' + e.message);
+        return;
+      }
+    }
+    try {
+      const res = await fetch('/api/skills/pending/' + encodeURIComponent(pendingId) + '/approve', { method: 'POST' });
+      const data = await res.json();
+      if (res.ok) {
+        document.getElementById('pendingModal').classList.remove('open');
+        currentPendingId = null;
+        await loadPendingSkills();
+        await loadSkills();
+        statusEl.textContent = data.message || '已通过';
+        setTimeout(() => { statusEl.textContent = '就绪'; }, 2000);
+      } else {
+        alert(data.detail || '审批失败');
+      }
+    } catch (e) {
+      alert('审批失败：' + e.message);
+    }
+  }
+
+  async function rejectPending(pendingId) {
+    if (!confirm('确定拒绝该候选技能吗？')) return;
+    try {
+      const res = await fetch('/api/skills/pending/' + encodeURIComponent(pendingId) + '/reject', { method: 'POST' });
+      const data = await res.json();
+      if (res.ok) {
+        document.getElementById('pendingModal').classList.remove('open');
+        currentPendingId = null;
+        await loadPendingSkills();
+        statusEl.textContent = '已拒绝';
+        setTimeout(() => { statusEl.textContent = '就绪'; }, 2000);
+      } else {
+        alert(data.detail || '操作失败');
+      }
+    } catch (e) {
+      alert('操作失败：' + e.message);
+    }
+  }
+
+  // 弹窗按钮绑定
+  document.getElementById('closePending').addEventListener('click', () => {
+    document.getElementById('pendingModal').classList.remove('open');
+    currentPendingId = null;
+  });
+  document.getElementById('closePending2').addEventListener('click', () => {
+    document.getElementById('pendingModal').classList.remove('open');
+    currentPendingId = null;
+  });
+  document.getElementById('approvePending').addEventListener('click', () => {
+    if (currentPendingId) approvePending(currentPendingId);
+  });
+  document.getElementById('rejectPending').addEventListener('click', () => {
+    if (currentPendingId) rejectPending(currentPendingId);
+  });
+  document.getElementById('pendingModal').addEventListener('click', (e) => {
+    if (e.target.id === 'pendingModal') {
+      e.target.classList.remove('open');
+      currentPendingId = null;
+    }
+  });
 
   let editingSkillName = null;
 

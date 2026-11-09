@@ -28,7 +28,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from langchain_core.messages import SystemMessage, message_to_dict
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from apex_harness.agent.orchestrator import Orchestrator
 from apex_harness.core.kernel import Kernel
@@ -179,6 +179,19 @@ async def lifespan(app: FastAPI):
     store = LocalEventStore(PROJECT_ROOT / ".events")
     tasks = TaskManager(store)
 
+    # 技能进化（右循环）：待审批队列 + SkillBank + Worker
+    from apex_harness.skills.evolution import (
+        PendingSkillStore,
+        SkillBank,
+        SkillEvolutionWorker,
+    )
+
+    sessions_dir = PROJECT_ROOT / "sessions"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    pending_store = PendingSkillStore(sessions_dir / "pending_skills.jsonl")
+    skill_bank = SkillBank(sessions_dir / "skillbank.jsonl")
+    evolution_worker = SkillEvolutionWorker(llm, skill_bank, pending_store)
+
     # 挂到 app.state，供路由使用
     app.state.kernel = kernel
     app.state.orchestrator = orch
@@ -187,6 +200,9 @@ async def lifespan(app: FastAPI):
     app.state.workspace_dir = workspace_dir
     app.state.apex_md = apex_md
     app.state.tasks = tasks
+    app.state.pending_store = pending_store
+    app.state.skill_bank = skill_bank
+    app.state.evolution_worker = evolution_worker
 
     yield
 
@@ -286,6 +302,145 @@ async def get_skills() -> list[dict[str, Any]]:
         is_builtin = not _is_user_skill(m.name)
         result.append({"name": m.name, "description": m.description, "is_builtin": is_builtin})
     return result
+
+
+# ---- 待审批技能（右循环产出，需用户审批后入库）---- #
+
+@app.get("/api/skills/pending")
+async def list_pending_skills() -> list[dict[str, Any]]:
+    """返回待审批的候选技能列表。"""
+    from apex_harness.skills.evolution.models import PendingSkill
+
+    pending_store = app.state.pending_store
+    items: list[PendingSkill] = pending_store.list_pending()
+    return [
+        {
+            "pending_id": p.pending_id,
+            "name": p.candidate.name,
+            "description": p.candidate.description,
+            "instruction": p.candidate.instruction,
+            "trigger_conditions": p.candidate.trigger_conditions,
+            "tools": p.candidate.tools,
+            "examples": p.candidate.examples,
+            "confidence_score": p.candidate.confidence_score,
+            "source_trace_id": p.candidate.source_trace_id,
+            "action": p.decision.action.value,
+            "reason": p.decision.reason,
+            "created_at": p.created_at.isoformat(),
+        }
+        for p in items
+    ]
+
+
+class PendingUpdateRequest(BaseModel):
+    """用户修改待审批候选的请求。"""
+    name: str = ""
+    description: str = ""
+    instruction: str = ""
+    trigger_conditions: list[str] = Field(default_factory=list)
+    tools: list[str] = Field(default_factory=list)
+    examples: list[str] = Field(default_factory=list)
+
+
+@app.put("/api/skills/pending/{pending_id}")
+async def update_pending_skill(
+    pending_id: str, req: PendingUpdateRequest
+) -> dict[str, Any]:
+    """用户修改待审批候选的内容。"""
+    from fastapi import HTTPException
+    from apex_harness.skills.evolution.models import CandidateSkill
+
+    pending_store = app.state.pending_store
+    pending = pending_store.get(pending_id)
+    if pending is None:
+        raise HTTPException(status_code=404, detail="待审批技能不存在")
+
+    # 基于原候选构建修改后的版本
+    old = pending.candidate
+    updated = CandidateSkill(
+        name=req.name or old.name,
+        description=req.description if req.description is not None else old.description,
+        instruction=req.instruction if req.instruction is not None else old.instruction,
+        trigger_conditions=req.trigger_conditions or old.trigger_conditions,
+        tools=req.tools or old.tools,
+        examples=req.examples or old.examples,
+        source_trace_id=old.source_trace_id,
+        confidence_score=old.confidence_score,
+    )
+    pending_store.update_candidate(pending_id, updated)
+    return {"message": "已更新", "pending_id": pending_id}
+
+
+@app.post("/api/skills/pending/{pending_id}/approve")
+async def approve_pending_skill(pending_id: str) -> dict[str, Any]:
+    """审批通过：将候选写入 SkillBank（并热加载为可用技能）。"""
+    from fastapi import HTTPException
+
+    worker = app.state.evolution_worker
+    result = await worker.approve(pending_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="待审批技能不存在")
+
+    entry = result.skill_entry
+    if entry is None:
+        raise HTTPException(status_code=500, detail="写入 SkillBank 失败")
+
+    # 热加载为可用技能（写入 user 目录 + 注册）
+    from apex_harness.skills.parser import parse_skill_md
+    from apex_harness.skills.base import SkillMetadata
+    from apex_harness.skills.adapter import SkillToolAdapter
+
+    content = (
+        f"---\nname: {entry.name}\n"
+        f"description: {entry.description}\n"
+        f"---\n\n{entry.instruction}\n"
+    )
+    # 校验格式
+    try:
+        parsed = parse_skill_md(content)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"格式错误：{e}")
+
+    # 保存到用户技能目录
+    skill_dir = USER_SKILLS_DIR / entry.name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
+
+    # 注册到技能注册表 + 工具注册表
+    metadata = SkillMetadata(
+        name=parsed.name,
+        description=parsed.description,
+        instructions=parsed.instructions,
+    )
+    skill_registry = app.state.kernel.services.require("skills")
+    tool_registry = app.state.kernel.services.require("tools")
+    skill_registry.register(metadata)
+    tool_registry.register(SkillToolAdapter(metadata))
+
+    existing_names = {m.name for m in app.state.skills_metadata}
+    if parsed.name not in existing_names:
+        app.state.skills_metadata.append(metadata)
+
+    orch: Orchestrator = app.state.orchestrator
+    orch.react.tools[metadata.name] = SkillToolAdapter(metadata)
+
+    return {
+        "message": f"技能 {entry.name} 已审批通过并加载",
+        "name": entry.name,
+        "version": entry.version,
+    }
+
+
+@app.post("/api/skills/pending/{pending_id}/reject")
+async def reject_pending_skill(pending_id: str) -> dict[str, Any]:
+    """审批拒绝：丢弃候选。"""
+    from fastapi import HTTPException
+
+    worker = app.state.evolution_worker
+    ok = await worker.reject(pending_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="待审批技能不存在")
+    return {"message": "已拒绝"}
 
 
 @app.get("/api/skills/{skill_name}")
