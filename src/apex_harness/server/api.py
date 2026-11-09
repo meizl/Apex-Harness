@@ -304,6 +304,20 @@ async def get_skills() -> list[dict[str, Any]]:
     return result
 
 
+@app.get("/api/tools")
+async def get_tools() -> list[dict[str, Any]]:
+    """返回当前已注册的工具列表（name + description + parameters）。"""
+    registry = app.state.kernel.services.require("tools")
+    result = []
+    for name, tool in registry.all.items():
+        result.append({
+            "name": name,
+            "description": getattr(tool, "description", "") or "",
+            "parameters": getattr(tool, "parameters", {}) or {},
+        })
+    return result
+
+
 # ---- 待审批技能（右循环产出，需用户审批后入库）---- #
 
 @app.get("/api/skills/pending")

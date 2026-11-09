@@ -35,12 +35,12 @@
 
   /* ===== 左侧边栏：技能管理 ===== */
   .sidebar {
-    width: 280px;
+    width: 300px;
     flex-shrink: 0;
     background: var(--sidebar-bg);
     border-right: 1px solid var(--border);
     display: flex;
-    flex-direction: column;
+    flex-direction: row;
     overflow: hidden;
     transition: width .25s ease;
   }
@@ -49,18 +49,57 @@
     border-right: none;
   }
 
-  .sidebar-header {
-    padding: 16px;
-    border-bottom: 1px solid var(--border);
+  .activity-bar {
+    width: 48px;
+    flex-shrink: 0;
+    background: var(--sidebar-bg);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 8px 0;
+    gap: 4px;
+  }
+  .activity-icon {
+    width: 40px;
+    height: 40px;
+    border: none;
+    background: none;
+    border-radius: 8px;
+    font-size: 18px;
+    cursor: pointer;
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    flex-shrink: 0;
+    justify-content: center;
+    transition: all .15s;
+    position: relative;
+  }
+  .activity-icon:hover { background: var(--bg-hover); }
+  .activity-icon.active {
+    background: var(--accent);
+  }
+  .activity-icon.active::before {
+    content: '';
+    position: absolute;
+    left: -8px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 3px;
+    height: 20px;
+    background: var(--accent);
+    border-radius: 0 2px 2px 0;
   }
 
-  .sidebar-header h2 {
-    font-size: 14px;
-    font-weight: 600;
+  .sidebar-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .sidebar-view {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px;
   }
 
   .sidebar-toggle {
@@ -104,10 +143,21 @@
   }
   .btn-add:hover { background: #2f6fe0; }
 
-  .skills-list, .pending-list {
+  .skills-list, .pending-list, .tools-list {
     flex: 1;
     overflow-y: auto;
     padding: 8px;
+  }
+
+  .group-title {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 8px 4px 4px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 6px;
   }
 
   .sidebar-tabs {
@@ -225,6 +275,39 @@
   .btn-approve:hover { background: #bbf7d0; }
   .btn-reject { background: #fee2e2; color: #dc2626; }
   .btn-reject:hover { background: #fecaca; }
+
+  /* 工具卡片 */
+  .tool-card {
+    padding: 10px 12px;
+    border-radius: 8px;
+    margin-bottom: 6px;
+    background: #fff;
+    border: 1px solid var(--border);
+    cursor: pointer;
+    transition: border-color .15s;
+  }
+  .tool-card:hover { border-color: var(--accent); }
+  .tool-card-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 2px;
+    font-family: monospace;
+  }
+  .tool-card-desc {
+    font-size: 11px;
+    color: var(--muted);
+    line-height: 1.4;
+  }
+  .tool-card-params {
+    font-size: 10px;
+    color: var(--muted);
+    margin-top: 4px;
+    font-family: monospace;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 
   .empty-skills {
     padding: 20px;
@@ -511,24 +594,16 @@
   <!-- 折叠后的展开按钮 -->
   <button class="sidebar-expand-btn" id="expandSidebar" title="展开技能面板">🧩</button>
 
-  <!-- 左侧边栏：技能管理 -->
+  <!-- 左侧边栏：纵向图标栏 + 内容区 -->
   <aside class="sidebar" id="sidebar">
-    <div class="sidebar-header">
-      <h2>🧩 技能</h2>
-      <div style="display:flex;gap:4px;align-items:center;">
-        <button class="btn-add" id="addSkillBtn">+ 新增</button>
-        <button class="sidebar-toggle" id="collapseSidebar" title="收起">◀</button>
-      </div>
+    <div class="activity-bar">
+      <button class="activity-icon active" data-view="skills" title="技能">🧩</button>
+      <button class="activity-icon" data-view="tools" title="工具">🛠️</button>
+      <button class="activity-icon" id="collapseSidebar" title="收起">◀</button>
     </div>
-    <div class="sidebar-tabs">
-      <button class="tab-btn active" data-tab="skills">技能</button>
-      <button class="tab-btn" data-tab="pending">待审批</button>
-    </div>
-    <div class="skills-list" id="skillsList">
-      <div class="empty-skills">加载中…</div>
-    </div>
-    <div class="pending-list" id="pendingList" style="display:none;">
-      <div class="empty-skills">加载中…</div>
+    <div class="sidebar-content">
+      <div class="sidebar-view" id="sidebarSkills"></div>
+      <div class="sidebar-view" id="sidebarTools" style="display:none;"></div>
     </div>
   </aside>
 
@@ -632,6 +707,22 @@
         <div class="modal-footer" id="detailFooter" style="display:none;margin-top:16px;">
           <button class="send" id="editSkillBtn" style="margin-left:auto;">编辑</button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 工具详情弹窗 -->
+  <div class="modal-overlay" id="toolModal">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 id="toolModalTitle">工具详情</h3>
+        <button class="modal-close" id="closeTool">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="detail-name" id="toolName"></div>
+        <div class="detail-desc" id="toolDesc"></div>
+        <div class="detail-section-title">参数 Schema</div>
+        <pre class="detail-instructions" id="toolParams" style="white-space:pre-wrap;word-break:break-all;"></pre>
       </div>
     </div>
   </div>
@@ -746,15 +837,13 @@
   loadHistory();
 
   // ===== 技能管理 =====
-  const skillsList = document.getElementById('skillsList');
-  const addSkillBtn = document.getElementById('addSkillBtn');
   const skillModal = document.getElementById('skillModal');
   const closeModal = document.getElementById('closeModal');
   const cancelSkill = document.getElementById('cancelSkill');
   const saveSkill = document.getElementById('saveSkill');
   const skillError = document.getElementById('skillError');
 
-  loadSkills();
+  loadSidebar();
 
   // 侧边栏折叠/展开
   const sidebar = document.getElementById('sidebar');
@@ -801,8 +890,7 @@
   }
 
   function _isBuiltinSkill(name) {
-    // 通过卡片上的 data-builtin 判断
-    const card = skillsList.querySelector(`.skill-card[data-name="${name}"]`);
+    const card = sidebarSkills.querySelector(`.skill-card[data-name="${name}"]`);
     return card ? card.dataset.builtin === 'true' : false;
   }
 
@@ -824,13 +912,18 @@
     if (e.target === detailModal) detailModal.classList.remove('open');
   });
 
-  // 技能卡片渲染时绑定点击事件
-  function renderSkills(skills) {
-    if (!skills.length) {
-      skillsList.innerHTML = '<div class="empty-skills">暂无技能，点击右上角 + 新增</div>';
-      return;
-    }
-    skillsList.innerHTML = skills.map(s =>
+  const sidebarSkills = document.getElementById('sidebarSkills');
+  const sidebarTools = document.getElementById('sidebarTools');
+
+  // 缓存数据，供详情弹窗使用
+  let allSkills = [];
+  let allTools = [];
+  let allPending = [];
+
+  // ---- 渲染单个分组的 HTML 片段 ----
+  function skillsHTML(skills) {
+    if (!skills.length) return '<div class="empty-skills" style="padding:8px;">暂无技能，点击右上角 + 新增</div>';
+    return skills.map(s =>
       `<div class="skill-card" data-name="${s.name}" data-builtin="${s.is_builtin}" title="点击查看详情">
         <div class="skill-card-name">
           ${s.name}
@@ -840,87 +933,29 @@
         ${!s.is_builtin ? '<div class="skill-card-actions"><button class="skill-delete" data-name="' + s.name + '">删除</button></div>' : ''}
       </div>`
     ).join('');
-    // 绑定点击事件
-    skillsList.querySelectorAll('.skill-card').forEach(card => {
-      card.addEventListener('click', () => showSkillDetail(card.dataset.name));
-    });
-    // 绑定删除按钮（阻止冒泡）
-    skillsList.querySelectorAll('.skill-delete').forEach(btn => {
-      btn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        deleteSkill(btn.dataset.name);
-      });
-    });
   }
 
-  async function deleteSkill(name) {
-    if (!confirm(`确定删除技能「${name}」吗？此操作不可撤销。`)) return;
-    try {
-      const res = await fetch('/api/skills/' + encodeURIComponent(name), { method: 'DELETE' });
-      const data = await res.json();
-      if (res.ok) {
-        await loadSkills();
-        statusEl.textContent = `技能 ${name} 已删除`;
-        setTimeout(() => { statusEl.textContent = '就绪'; }, 2000);
-      } else {
-        alert(data.detail || '删除失败');
-      }
-    } catch (e) {
-      alert('删除失败：' + e.message);
-    }
+  function toolsHTML(tools) {
+    if (!tools.length) return '<div class="empty-skills" style="padding:8px;">暂无工具</div>';
+    return tools.map(t => {
+      const props = t.parameters && t.parameters.properties ? t.parameters.properties : {};
+      const paramKeys = Object.keys(props);
+      const paramList = paramKeys.map(k => {
+        const type = props[k].type || 'any';
+        const req = t.parameters.required && t.parameters.required.includes(k) ? '<span style="color:#dc2626;">*</span>' : '';
+        return `<code style="font-size:10px;background:#f3f4f6;padding:1px 4px;border-radius:3px;">${k}:${type}${req}</code>`;
+      }).join(' ');
+      return `<div class="tool-card" data-name="${t.name}">
+        <div class="tool-card-name">${t.name}</div>
+        <div class="tool-card-desc">${t.description || '(无描述)'}</div>
+        <div style="display:flex;flex-wrap:wrap;gap:3px;margin-top:4px;">${paramList || '<span style="font-size:10px;color:var(--muted);">无参数</span>'}</div>
+      </div>`;
+    }).join('');
   }
 
-  // 重写 loadSkills 使用 renderSkills
-  async function loadSkills() {
-    try {
-      const res = await fetch('/api/skills');
-      const skills = await res.json();
-      renderSkills(skills);
-    } catch (e) {
-      skillsList.innerHTML = '<div class="empty-skills">加载失败</div>';
-    }
-  }
-
-  // ---- Tab 切换 ----
-  const tabBtns = document.querySelectorAll('.tab-btn');
-  const skillsListEl = document.getElementById('skillsList');
-  const pendingListEl = document.getElementById('pendingList');
-
-  tabBtns.forEach(btn => {
-    btn.addEventListener('click', () => {
-      tabBtns.forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      const tab = btn.dataset.tab;
-      if (tab === 'skills') {
-        skillsListEl.style.display = '';
-        pendingListEl.style.display = 'none';
-      } else {
-        skillsListEl.style.display = 'none';
-        pendingListEl.style.display = '';
-        loadPendingSkills();
-      }
-    });
-  });
-
-  // ---- 待审批列表 ----
-  let currentPendingId = null;
-
-  async function loadPendingSkills() {
-    try {
-      const res = await fetch('/api/skills/pending');
-      const items = await res.json();
-      renderPending(items);
-    } catch (e) {
-      pendingListEl.innerHTML = '<div class="empty-skills">加载失败</div>';
-    }
-  }
-
-  function renderPending(items) {
-    if (!items.length) {
-      pendingListEl.innerHTML = '<div class="empty-skills">暂无待审批技能</div>';
-      return;
-    }
-    pendingListEl.innerHTML = items.map(p =>
+  function pendingHTML(items) {
+    if (!items.length) return '<div class="empty-skills" style="padding:8px;">暂无待审批</div>';
+    return items.map(p =>
       `<div class="pending-card" data-id="${p.pending_id}">
         <div class="pending-card-name">${p.name}</div>
         <div class="pending-card-desc">${p.description || '(无描述)'}</div>
@@ -931,21 +966,53 @@
         </div>
       </div>`
     ).join('');
-    // 点击卡片打开编辑
-    pendingListEl.querySelectorAll('.pending-card').forEach(card => {
+  }
+
+  // 渲染：技能视图 = 新增按钮 + 技能列表 + 待审批列表；工具视图 = 工具列表
+  function renderSidebar() {
+    const pendingBlock = allPending.length
+      ? `<div class="group-title">⏳ 待审批 (${allPending.length})</div>${pendingHTML(allPending)}`
+      : '';
+    sidebarSkills.innerHTML =
+      `<div style="padding:8px 8px 4px;"><button class="btn-add" id="addSkillBtn" style="width:100%;">+ 新增技能</button></div>
+       <div class="group-title">🧩 技能 (${allSkills.length})</div>${skillsHTML(allSkills)}
+       ${pendingBlock}`;
+    sidebarTools.innerHTML = toolsHTML(allTools);
+    bindSidebarEvents();
+  }
+
+  function bindSidebarEvents() {
+    // 新增技能按钮
+    const addBtn = document.getElementById('addSkillBtn');
+    if (addBtn) addBtn.addEventListener('click', openAddSkill);
+    // 技能
+    sidebarSkills.querySelectorAll('.skill-card').forEach(card => {
+      card.addEventListener('click', () => showSkillDetail(card.dataset.name));
+    });
+    sidebarSkills.querySelectorAll('.skill-delete').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        deleteSkill(btn.dataset.name);
+      });
+    });
+    // 工具
+    sidebarTools.querySelectorAll('.tool-card').forEach(card => {
+      card.addEventListener('click', () => openToolDetail(card.dataset.name));
+    });
+    // 待审批
+    sidebarSkills.querySelectorAll('.pending-card').forEach(card => {
       card.addEventListener('click', (e) => {
         if (e.target.tagName === 'BUTTON') return;
         openPendingDetail(card.dataset.id);
       });
     });
-    // 快捷通过/拒绝
-    pendingListEl.querySelectorAll('.btn-approve').forEach(btn => {
+    sidebarSkills.querySelectorAll('.btn-approve').forEach(btn => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
         approvePending(btn.dataset.id);
       });
     });
-    pendingListEl.querySelectorAll('.btn-reject').forEach(btn => {
+    sidebarSkills.querySelectorAll('.btn-reject').forEach(btn => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
         rejectPending(btn.dataset.id);
@@ -953,23 +1020,83 @@
     });
   }
 
-  async function openPendingDetail(pendingId) {
+  // 图标切换视图
+  const iconTabs = document.querySelectorAll('.activity-icon[data-view]');
+  const views = { skills: sidebarSkills, tools: sidebarTools };
+  iconTabs.forEach(btn => {
+    btn.addEventListener('click', () => {
+      iconTabs.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const view = btn.dataset.view;
+      Object.entries(views).forEach(([k, el]) => {
+        el.style.display = k === view ? '' : 'none';
+      });
+    });
+  });
+
+  async function loadSidebar() {
     try {
-      // 从列表数据里找，或重新拉取。这里重新拉取详情
-      const res = await fetch('/api/skills/pending');
-      const items = await res.json();
-      const p = items.find(x => x.pending_id === pendingId);
-      if (!p) { alert('待审批技能不存在'); return; }
-      currentPendingId = pendingId;
-      document.getElementById('pendingName').value = p.name;
-      document.getElementById('pendingDesc').value = p.description || '';
-      document.getElementById('pendingInstruction').value = p.instruction || '';
-      document.getElementById('pendingMeta').textContent =
-        `动作: ${p.action} · 来源: ${p.source_trace_id} · 置信度: ${(p.confidence_score * 100).toFixed(0)}%`;
-      document.getElementById('pendingModal').classList.add('open');
+      const [sRes, tRes, pRes] = await Promise.all([
+        fetch('/api/skills'),
+        fetch('/api/tools'),
+        fetch('/api/skills/pending'),
+      ]);
+      allSkills = await sRes.json();
+      allTools = await tRes.json();
+      allPending = await pRes.json();
+      renderSidebar();
     } catch (e) {
-      alert('加载失败：' + e.message);
+      sidebarSkills.innerHTML = '<div class="empty-skills">加载失败</div>';
     }
+  }
+
+  async function deleteSkill(name) {
+    if (!confirm(`确定删除技能「${name}」吗？此操作不可撤销。`)) return;
+    try {
+      const res = await fetch('/api/skills/' + encodeURIComponent(name), { method: 'DELETE' });
+      const data = await res.json();
+      if (res.ok) {
+        await loadSidebar();
+        statusEl.textContent = `技能 ${name} 已删除`;
+        setTimeout(() => { statusEl.textContent = '就绪'; }, 2000);
+      } else {
+        alert(data.detail || '删除失败');
+      }
+    } catch (e) {
+      alert('删除失败：' + e.message);
+    }
+  }
+
+  function openToolDetail(name) {
+    const t = allTools.find(x => x.name === name);
+    if (!t) return;
+    document.getElementById('toolModalTitle').textContent = t.name;
+    document.getElementById('toolName').textContent = t.name;
+    document.getElementById('toolDesc').textContent = t.description || '(无描述)';
+    document.getElementById('toolParams').textContent = JSON.stringify(t.parameters, null, 2);
+    document.getElementById('toolModal').classList.add('open');
+  }
+
+  document.getElementById('closeTool').addEventListener('click', () => {
+    document.getElementById('toolModal').classList.remove('open');
+  });
+  document.getElementById('toolModal').addEventListener('click', (e) => {
+    if (e.target.id === 'toolModal') e.target.classList.remove('open');
+  });
+
+  // ---- 待审批详情/通过/拒绝 ----
+  let currentPendingId = null;
+
+  async function openPendingDetail(pendingId) {
+    const p = allPending.find(x => x.pending_id === pendingId);
+    if (!p) { alert('待审批技能不存在'); return; }
+    currentPendingId = pendingId;
+    document.getElementById('pendingName').value = p.name;
+    document.getElementById('pendingDesc').value = p.description || '';
+    document.getElementById('pendingInstruction').value = p.instruction || '';
+    document.getElementById('pendingMeta').textContent =
+      `动作: ${p.action} · 来源: ${p.source_trace_id} · 置信度: ${(p.confidence_score * 100).toFixed(0)}%`;
+    document.getElementById('pendingModal').classList.add('open');
   }
 
   // 先保存修改，再通过
@@ -996,8 +1123,7 @@
       if (res.ok) {
         document.getElementById('pendingModal').classList.remove('open');
         currentPendingId = null;
-        await loadPendingSkills();
-        await loadSkills();
+        await loadSidebar();
         statusEl.textContent = data.message || '已通过';
         setTimeout(() => { statusEl.textContent = '就绪'; }, 2000);
       } else {
@@ -1016,7 +1142,7 @@
       if (res.ok) {
         document.getElementById('pendingModal').classList.remove('open');
         currentPendingId = null;
-        await loadPendingSkills();
+        await loadSidebar();
         statusEl.textContent = '已拒绝';
         setTimeout(() => { statusEl.textContent = '就绪'; }, 2000);
       } else {
@@ -1051,7 +1177,7 @@
 
   let editingSkillName = null;
 
-  addSkillBtn.addEventListener('click', () => {
+  function openAddSkill() {
     editingSkillName = null;
     document.getElementById('modalTitle').textContent = '新增技能';
     document.getElementById('skillName').value = '';
@@ -1060,7 +1186,7 @@
     document.getElementById('skillInstructions').value = '';
     skillError.classList.remove('show');
     skillModal.classList.add('open');
-  });
+  }
 
   closeModal.addEventListener('click', () => skillModal.classList.remove('open'));
   cancelSkill.addEventListener('click', () => skillModal.classList.remove('open'));
@@ -1104,7 +1230,7 @@
       const data = await res.json();
       if (res.ok) {
         skillModal.classList.remove('open');
-        await loadSkills();
+        await loadSidebar();
         statusEl.textContent = `技能 ${name} 已${editingSkillName ? '更新' : '创建'}`;
         setTimeout(() => { statusEl.textContent = '就绪'; }, 2000);
       } else {
