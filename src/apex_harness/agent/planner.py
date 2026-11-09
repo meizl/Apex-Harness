@@ -30,6 +30,26 @@ _PLAN_PROMPT = """你是一个任务规划助手。把用户的任务拆成 3-8 
 ["读取 README.md 了解项目结构", "查看 src 目录下的主要模块", "总结项目架构并生成文档"]"""
 
 
+# 重规划提示词：基于已执行结果和反馈调整剩余步骤
+_REPLAN_PROMPT = """你是一个任务重规划助手。根据已执行步骤的结果和反馈，调整剩余的执行计划。
+
+输入信息：
+- 原始任务：{task}
+- 已完成步骤及结果：
+{completed}
+- 剩余步骤：
+{remaining}
+- 反馈/问题：{feedback}
+
+要求：
+- 如果已执行结果表明原计划需要调整，重新规划剩余步骤
+- 如果剩余步骤仍然合理，直接返回原剩余步骤（可微调）
+- 只输出 JSON 数组（步骤列表），不要解释，不要 markdown
+
+示例：
+["修正配置文件路径", "重新运行测试"]"""
+
+
 class CreatePlanTool(Tool):
     """生成任务计划的工具。调用 LLM 把任务拆成步骤列表。"""
 
@@ -105,3 +125,60 @@ class Planner:
         # 运行 AgentLoop，LLM 会调用 create_plan 工具
         await self._loop.run(f"请为以下任务生成执行计划：{task}")
         return self._plan_tool.last_plan
+
+    async def replan(
+        self,
+        original_task: str,
+        completed: list[dict[str, str]],
+        remaining: list[str],
+        feedback: str = "",
+    ) -> list[str]:
+        """基于已执行结果和反馈，重新规划剩余步骤。
+
+        Args:
+            original_task: 原始用户任务
+            completed: 已完成步骤列表，每项 ``{"step": ..., "result": ...}``
+            remaining: 原计划中剩余未执行的步骤
+            feedback: 失败信息或用户反馈（如某步连续失败的错误、用户说"不对"等）
+
+        Returns:
+            新的剩余步骤列表。若 LLM 未返回有效列表，则原样返回 ``remaining``。
+        """
+        completed_text = "\n".join(
+            f"  - {c['step']} → {c['result'][:200]}" for c in completed
+        ) or "  （无）"
+        remaining_text = "\n".join(f"  - {r}" for r in remaining) or "  （无）"
+
+        prompt = _REPLAN_PROMPT.format(
+            task=original_task,
+            completed=completed_text,
+            remaining=remaining_text,
+            feedback=feedback or "（无额外反馈）",
+        )
+
+        try:
+            reply = await self._llm.chat([
+                SystemMessage(content=prompt),
+                HumanMessage(content="请根据以上信息输出调整后的剩余步骤 JSON 数组。"),
+            ])
+            text = (reply.content or "").strip()
+            steps = self._parse_steps(text)
+            return steps if steps else list(remaining)
+        except Exception:
+            # LLM 调用失败时保守返回原剩余步骤，不中断执行
+            return list(remaining)
+
+    @staticmethod
+    def _parse_steps(text: str) -> list[str]:
+        """从 LLM 输出中解析步骤列表。"""
+        steps: list[str] = []
+        try:
+            steps = json.loads(text)
+            if not isinstance(steps, list):
+                steps = []
+        except json.JSONDecodeError:
+            for line in text.splitlines():
+                line = line.strip().lstrip("-*0123456789. ")
+                if line:
+                    steps.append(line)
+        return [s for s in steps if isinstance(s, str) and s.strip()]

@@ -23,6 +23,12 @@ from apex_harness.llm.base import LLMProvider
 from apex_harness.session.session import Session
 from apex_harness.tools.base import Tool
 
+# 用户中断重规划的触发关键词
+_INTERRUPT_KEYWORDS = (
+    "不对", "错了", "错", "不对不对", "重新来", "重新规划", "重新计划",
+    "停", "停止", "等等", "不对啊", "有问题", "不对吧",
+)
+
 # 复杂度分类提示词
 _CLASSIFY_PROMPT = """你是一个任务复杂度分类器。判断用户的请求属于「简单」还是「复杂」任务。
 
@@ -76,6 +82,8 @@ class Orchestrator:
         *,
         tools: dict[str, Tool] | None = None,
         max_steps: int = 10,
+        max_retries: int = 2,
+        enable_observation_replan: bool = True,
     ) -> None:
         self.session = session
         self.llm = llm
@@ -85,6 +93,14 @@ class Orchestrator:
         self.planner = Planner(llm)
         #: 当前计划及每个步骤的执行状态（复杂任务时填充，供进度查询）。
         self.plan: list[PlanStep] = []
+        #: 单步最大重试次数（失败重规划触发阈值）
+        self.max_retries = max_retries
+        #: 是否开启观察驱动重规划（每步完成后评估是否调整）
+        self.enable_observation_replan = enable_observation_replan
+        #: 当前 Plan-and-Execute 的原始任务（供用户中断重规划使用）
+        self._original_task: str = ""
+        #: 已完成步骤及其结果摘要（供重规划使用）
+        self._step_results: list[dict[str, str]] = []
 
     async def _classify(self, user_input: str) -> str:
         """用 LLM 判断任务复杂度，返回 ``"simple"`` 或 ``"complex"``。"""
@@ -100,6 +116,20 @@ class Orchestrator:
         except Exception:
             # LLM 分类失败时保守回退为 simple，走 ReAct
             return "simple"
+
+    def _is_interrupt_signal(self, text: str) -> bool:
+        """判断用户输入是否为中断/重规划信号。"""
+        t = text.strip()
+        if not t:
+            return False
+        return any(kw in t for kw in _INTERRUPT_KEYWORDS)
+
+    def _has_active_plan(self) -> bool:
+        """是否有未完成的 Plan-and-Execute 计划。"""
+        return bool(self.plan) and any(
+            s.status in (StepStatus.PENDING, StepStatus.RUNNING, StepStatus.FAILED)
+            for s in self.plan
+        )
 
     async def run_stream(self, user_input: str, **kwargs: Any) -> AsyncIterator[str]:
         """流式执行：先路由，再调度执行器。"""
@@ -118,7 +148,16 @@ class Orchestrator:
 
         简单任务直接把 ReAct 的事件透传；复杂任务把 Plan-and-Execute 的
         文本输出包装成事件（用同一 generation_id 标识该次执行）。
+
+        用户中断重规划：若用户输入是中断信号（如"不对"）且存在未完成计划，
+        则带着已执行结果重新规划剩余步骤并继续执行。
         """
+        # 用户中断重规划：检测到中断信号 + 有未完成计划
+        if self._is_interrupt_signal(user_input) and self._has_active_plan():
+            async for ev in self._run_interrupt_replan(user_input, **kwargs):
+                yield ev
+            return
+
         mode = await self._classify(user_input)
 
         if mode == "complex":
@@ -131,11 +170,11 @@ class Orchestrator:
     async def _run_plan_and_execute_events(
         self, user_input: str, **kwargs: Any
     ) -> AsyncIterator[StreamEvent]:
-        """把 Plan-and-Execute 的执行过程产出为事件流。
+        """把 Plan-and-Execute 的执行过程产出为事件流（含重规划）。
 
-        每个步骤直接透传 ReAct 的 ``run_stream_events`` 事件，保证步骤内的
-        模型回复是 token 级流式的（前端能逐字渲染）；不再像旧实现那样经
-        ``run_stream`` 缓冲到整段结束才一次性吐出。
+        重规划机制：
+        - 失败重规划：单步连续失败 ``max_retries`` 次后，带着已执行结果重新规划剩余步骤。
+        - 观察驱动重规划：每步完成后调用 Planner 评估是否需要调整剩余步骤。
         """
         generation_id = new_generation_id()
         yield StreamEvent(type="generation_start", generation_id=generation_id)
@@ -152,6 +191,8 @@ class Orchestrator:
             yield StreamEvent(type="done", generation_id=generation_id)
             return
 
+        self._original_task = user_input
+        self._step_results = []
         self.plan = [PlanStep(description=s) for s in steps]
 
         yield StreamEvent(type="text", generation_id=generation_id, text="📋 执行计划：\n")
@@ -159,27 +200,177 @@ class Orchestrator:
             yield StreamEvent(type="text", generation_id=generation_id, text=f"  {i}. {step}\n")
         yield StreamEvent(type="text", generation_id=generation_id, text="\n")
 
-        for i, step in enumerate(steps, 1):
-            plan_step = self.plan[i - 1]
+        # 用索引遍历，支持重规划后步骤列表变化
+        idx = 0
+        while idx < len(self.plan):
+            plan_step = self.plan[idx]
+            # 跳过已完成的步骤（重规划后可能混入已执行步骤）
+            if plan_step.status == StepStatus.DONE:
+                idx += 1
+                continue
+
+            step_text = plan_step.description
             plan_step.status = StepStatus.RUNNING
-            yield StreamEvent(type="text", generation_id=generation_id, text=f"\n⏳ 步骤 {i}/{len(steps)}：{step}\n")
+            yield StreamEvent(type="text", generation_id=generation_id, text=f"\n⏳ 步骤 {idx + 1}/{len(self.plan)}：{step_text}\n")
+
+            step_output = ""
+            success = False
+            error_msg = ""
+
+            # 失败重规划：重试 max_retries 次
+            for attempt in range(self.max_retries + 1):
+                if attempt > 0:
+                    yield StreamEvent(type="text", generation_id=generation_id, text=f"   🔄 第 {attempt + 1} 次重试...\n")
+                try:
+                    step_output = ""
+                    async for ev in self.react.run_stream_events(step_text, **kwargs):
+                        if ev.type == "done":
+                            continue
+                        if ev.type == "error":
+                            if ev.text:
+                                step_output += ev.text
+                                yield StreamEvent(type="text", generation_id=ev.generation_id, text=ev.text)
+                            continue
+                        if ev.type == "text" and ev.text:
+                            step_output += ev.text
+                        yield ev
+                    success = True
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    error_msg = str(exc)
+                    yield StreamEvent(type="text", generation_id=generation_id, text=f"   ❌ 尝试 {attempt + 1} 失败：{exc}\n")
+
+            if success:
+                plan_step.status = StepStatus.DONE
+                self._step_results.append({"step": step_text, "result": step_output[:500]})
+                yield StreamEvent(type="text", generation_id=generation_id, text=f"\n✅ 步骤 {idx + 1}/{len(self.plan)} 完成\n")
+
+                # 观察驱动重规划：每步完成后评估是否调整剩余步骤
+                if self.enable_observation_replan and idx < len(self.plan) - 1:
+                    async for ev in self._maybe_observation_replan(generation_id, **kwargs):
+                        yield ev
+            else:
+                plan_step.status = StepStatus.FAILED
+                plan_step.error = error_msg
+                self._step_results.append({"step": step_text, "result": f"[FAILED] {error_msg}"})
+                yield StreamEvent(type="text", generation_id=generation_id, text=f"\n❌ 步骤 {idx + 1}/{len(self.plan)} 连续失败 {self.max_retries + 1} 次\n")
+
+                # 失败重规划：带着已执行结果重新规划剩余步骤
+                async for ev in self._maybe_failure_replan(generation_id, error_msg, **kwargs):
+                    yield ev
+
+            idx += 1
+
+        done = sum(1 for s in self.plan if s.status is StepStatus.DONE)
+        failed = sum(1 for s in self.plan if s.status is StepStatus.FAILED)
+        yield StreamEvent(type="text", generation_id=generation_id, text=f"\n✅ 完成 {done} 步，失败 {failed} 步。")
+        yield StreamEvent(type="done", generation_id=generation_id)
+
+    async def _maybe_failure_replan(
+        self, generation_id: str, error_msg: str, **kwargs: Any
+    ) -> AsyncIterator[StreamEvent]:
+        """失败重规划：基于已执行结果和错误信息重新规划剩余步骤。"""
+        completed = list(self._step_results)
+        remaining = [s.description for s in self.plan if s.status in (StepStatus.PENDING, StepStatus.FAILED)]
+        if not remaining:
+            return
+
+        yield StreamEvent(type="text", generation_id=generation_id, text="   🔄 触发失败重规划，正在调整剩余步骤...\n")
+        new_remaining = await self.planner.replan(
+            original_task=self._original_task,
+            completed=completed,
+            remaining=remaining,
+            feedback=f"步骤连续失败：{error_msg}",
+        )
+
+        # 用新的剩余步骤替换 plan 中未完成的部分
+        done_steps = [s for s in self.plan if s.status == StepStatus.DONE]
+        self.plan = done_steps + [PlanStep(description=s) for s in new_remaining]
+        yield StreamEvent(type="text", generation_id=generation_id, text=f"   📋 调整后的剩余步骤：\n")
+        for i, s in enumerate(new_remaining, 1):
+            yield StreamEvent(type="text", generation_id=generation_id, text=f"      {i}. {s}\n")
+
+    async def _maybe_observation_replan(
+        self, generation_id: str, **kwargs: Any
+    ) -> AsyncIterator[StreamEvent]:
+        """观察驱动重规划：每步完成后评估是否需要调整剩余步骤。"""
+        completed = list(self._step_results)
+        remaining = [s.description for s in self.plan if s.status == StepStatus.PENDING]
+        if not remaining:
+            return
+
+        new_remaining = await self.planner.replan(
+            original_task=self._original_task,
+            completed=completed,
+            remaining=remaining,
+            feedback="评估已执行结果，判断剩余步骤是否需要调整。如无需调整请原样返回。",
+        )
+
+        # 仅当新计划与原剩余步骤不同时才替换
+        if new_remaining != remaining:
+            yield StreamEvent(type="text", generation_id=generation_id, text="   🔄 观察到计划需要调整，更新剩余步骤...\n")
+            done_steps = [s for s in self.plan if s.status == StepStatus.DONE]
+            self.plan = done_steps + [PlanStep(description=s) for s in new_remaining]
+            for i, s in enumerate(new_remaining, 1):
+                yield StreamEvent(type="text", generation_id=generation_id, text=f"      {i}. {s}\n")
+
+    async def _run_interrupt_replan(
+        self, user_feedback: str, **kwargs: Any
+    ) -> AsyncIterator[StreamEvent]:
+        """用户中断重规划：用户说"不对"等信号时，基于反馈重新规划并执行。"""
+        generation_id = new_generation_id()
+        yield StreamEvent(type="generation_start", generation_id=generation_id)
+
+        completed = list(self._step_results)
+        remaining = [s.description for s in self.plan if s.status in (StepStatus.PENDING, StepStatus.FAILED, StepStatus.RUNNING)]
+
+        yield StreamEvent(type="text", generation_id=generation_id, text=f"⚠️ 检测到中断信号：{user_feedback}\n")
+        yield StreamEvent(type="text", generation_id=generation_id, text="🔄 基于已执行结果和你的反馈重新规划...\n\n")
+
+        new_remaining = await self.planner.replan(
+            original_task=self._original_task,
+            completed=completed,
+            remaining=remaining,
+            feedback=f"用户反馈：{user_feedback}",
+        )
+
+        # 替换 plan 中未完成的部分
+        done_steps = [s for s in self.plan if s.status == StepStatus.DONE]
+        self.plan = done_steps + [PlanStep(description=s) for s in new_remaining]
+
+        yield StreamEvent(type="text", generation_id=generation_id, text="📋 调整后的执行计划：\n")
+        for i, s in enumerate(new_remaining, 1):
+            yield StreamEvent(type="text", generation_id=generation_id, text=f"  {i}. {s}\n")
+        yield StreamEvent(type="text", generation_id=generation_id, text="\n")
+
+        # 执行新的剩余步骤（复用 plan-and-execute 的核心循环）
+        idx = len(done_steps)
+        while idx < len(self.plan):
+            plan_step = self.plan[idx]
+            step_text = plan_step.description
+            plan_step.status = StepStatus.RUNNING
+            yield StreamEvent(type="text", generation_id=generation_id, text=f"\n⏳ 步骤 {idx + 1}/{len(self.plan)}：{step_text}\n")
+
+            step_output = ""
             try:
-                async for ev in self.react.run_stream_events(step, **kwargs):
-                    # 步骤内部的 done 不对外，由外层统一收尾，避免提前关闭 SSE。
+                async for ev in self.react.run_stream_events(step_text, **kwargs):
                     if ev.type == "done":
                         continue
-                    # 步骤内出错：把错误文本透传为 text，但不作为整体终态。
                     if ev.type == "error":
                         if ev.text:
                             yield StreamEvent(type="text", generation_id=ev.generation_id, text=ev.text)
                         continue
+                    if ev.type == "text" and ev.text:
+                        step_output += ev.text
                     yield ev
                 plan_step.status = StepStatus.DONE
-                yield StreamEvent(type="text", generation_id=generation_id, text=f"\n✅ 步骤 {i}/{len(steps)} 完成\n")
-            except Exception as exc:  # noqa: BLE001 - 单步失败不中断整体
+                self._step_results.append({"step": step_text, "result": step_output[:500]})
+                yield StreamEvent(type="text", generation_id=generation_id, text=f"\n✅ 步骤 {idx + 1}/{len(self.plan)} 完成\n")
+            except Exception as exc:  # noqa: BLE001
                 plan_step.status = StepStatus.FAILED
                 plan_step.error = str(exc)
-                yield StreamEvent(type="text", generation_id=generation_id, text=f"\n❌ 步骤 {i}/{len(steps)} 失败：{exc}\n")
+                yield StreamEvent(type="text", generation_id=generation_id, text=f"\n❌ 步骤 {idx + 1}/{len(self.plan)} 失败：{exc}\n")
+            idx += 1
 
         done = sum(1 for s in self.plan if s.status is StepStatus.DONE)
         failed = sum(1 for s in self.plan if s.status is StepStatus.FAILED)
