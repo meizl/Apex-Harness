@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from typing import Any, AsyncIterator
 
@@ -122,6 +123,67 @@ class AgentLoop:
         if call_id:
             cache[call_id] = result
         return result
+
+    # -- 工具执行（支持事件流式转发） ------------------------------------
+
+    async def _execute_tool_events(
+        self,
+        tool_call: dict[str, Any],
+        cache: dict[str, str],
+        result_holder: dict[str, str],
+    ) -> AsyncIterator[StreamEvent]:
+        """执行工具调用并产出其内部的 StreamEvent。
+
+        若工具的 ``run`` 签名含 ``event_queue`` 参数（如
+        :class:`~apex_harness.agent.subagent.GetSubAgentResultTool`），
+        则注入 ``asyncio.Queue`` 并后台运行，同时把队列中的事件逐个 yield
+        出来，实现子 Agent 执行过程的实时透传。最终结果存入
+        ``result_holder["result"]``。
+        """
+        name = tool_call.get("name", "")
+        args = tool_call.get("args", {}) or {}
+        call_id = tool_call.get("id", "")
+
+        if call_id and call_id in cache:
+            result_holder["result"] = cache[call_id]
+            return
+
+        tool = self.tools.get(name)
+        if tool is None:
+            result = f"Error: 未知工具 '{name}'"
+        else:
+            sig = inspect.signature(tool.run)
+            supports_events = "event_queue" in sig.parameters
+
+            if supports_events:
+                queue: asyncio.Queue[StreamEvent] = asyncio.Queue()
+                task = asyncio.create_task(tool.run(**args, event_queue=queue))
+
+                while not task.done() or not queue.empty():
+                    try:
+                        ev = await asyncio.wait_for(queue.get(), timeout=0.05)
+                        if ev is not None:
+                            yield ev
+                    except asyncio.TimeoutError:
+                        if task.done():
+                            break
+                        continue
+
+                try:
+                    result = await task
+                except Exception as exc:  # noqa: BLE001
+                    result = f"Error: 执行工具 '{name}' 时出错: {exc}"
+            else:
+                try:
+                    result = await tool.run(**args)
+                except Exception as exc:  # noqa: BLE001
+                    result = f"Error: 执行工具 '{name}' 时出错: {exc}"
+
+            result = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+
+        if call_id:
+            cache[call_id] = result
+        result_holder["result"] = result
 
     # -- 状态初始化 -------------------------------------------------------
 
@@ -355,7 +417,14 @@ class AgentLoop:
                             "id": tool_call["id"],
                         },
                     )
-                    result = await self._execute_tool_call(tool_call, state.tool_results)
+                    # 使用支持事件转发的执行器：子 Agent 内部的 StreamEvent
+                    # 会被实时透传到主事件流。
+                    holder: dict[str, str] = {}
+                    async for ev in self._execute_tool_events(
+                        tool_call, state.tool_results, holder
+                    ):
+                        yield ev
+                    result = holder["result"]
                     call_id = tool_call.get("id", "")
                     self.session.add_tool(result, tool_call_id=call_id)
                     yield StreamEvent(

@@ -40,54 +40,21 @@
     background: var(--sidebar-bg);
     border-right: 1px solid var(--border);
     display: flex;
-    flex-direction: row;
+    flex-direction: column;
     overflow: hidden;
     transition: width .25s ease;
+    position: relative;
   }
   .sidebar.collapsed {
     width: 0;
     border-right: none;
   }
-
-  .activity-bar {
-    width: 48px;
-    flex-shrink: 0;
-    background: var(--sidebar-bg);
-    border-right: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    padding: 8px 0;
-    gap: 4px;
+  .sidebar.collapsed .sidebar-content {
+    opacity: 0;
+    pointer-events: none;
   }
-  .activity-icon {
-    width: 40px;
-    height: 40px;
-    border: none;
-    background: none;
-    border-radius: 8px;
-    font-size: 18px;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: all .15s;
-    position: relative;
-  }
-  .activity-icon:hover { background: var(--bg-hover); }
-  .activity-icon.active {
-    background: var(--accent);
-  }
-  .activity-icon.active::before {
-    content: '';
-    position: absolute;
-    left: -8px;
-    top: 50%;
-    transform: translateY(-50%);
-    width: 3px;
-    height: 20px;
-    background: var(--accent);
-    border-radius: 0 2px 2px 0;
+  .sidebar.collapsed .sidebar-collapse-btn {
+    display: none;
   }
 
   .sidebar-content {
@@ -98,9 +65,34 @@
   }
   .sidebar-view {
     flex: 1;
+    min-height: 0;
     overflow-y: auto;
     padding: 8px;
   }
+  .sidebar-divider {
+    height: 1px;
+    background: var(--border);
+    flex-shrink: 0;
+  }
+
+  .sidebar-collapse-btn {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    width: 28px;
+    height: 28px;
+    border: 1px solid var(--border);
+    background: var(--sidebar-bg);
+    border-radius: 6px;
+    cursor: pointer;
+    color: var(--muted);
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2;
+  }
+  .sidebar-collapse-btn:hover { background: #fff; color: var(--text); }
 
   .sidebar-toggle {
     background: none;
@@ -158,6 +150,25 @@
     padding: 8px 4px 4px;
     border-bottom: 1px solid var(--border);
     margin-bottom: 6px;
+    cursor: pointer;
+    user-select: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .group-title .arrow {
+    font-size: 9px;
+    transition: transform .2s;
+  }
+  .group-title.collapsed .arrow {
+    transform: rotate(90deg);
+  }
+  .collapsible-content {
+    overflow: hidden;
+    transition: max-height .2s ease;
+  }
+  .collapsible-content.collapsed {
+    display: none;
   }
 
   .sidebar-tabs {
@@ -592,19 +603,16 @@
 </head>
 <body>
   <!-- 折叠后的展开按钮 -->
-  <button class="sidebar-expand-btn" id="expandSidebar" title="展开技能面板">🧩</button>
+  <button class="sidebar-expand-btn" id="expandSidebar" title="展开侧边栏">☰</button>
 
-  <!-- 左侧边栏：纵向图标栏 + 内容区 -->
+  <!-- 左侧边栏：技能面板 + 工具面板，直接分开展示 -->
   <aside class="sidebar" id="sidebar">
-    <div class="activity-bar">
-      <button class="activity-icon active" data-view="skills" title="技能">🧩</button>
-      <button class="activity-icon" data-view="tools" title="工具">🛠️</button>
-      <button class="activity-icon" id="collapseSidebar" title="收起">◀</button>
-    </div>
     <div class="sidebar-content">
       <div class="sidebar-view" id="sidebarSkills"></div>
-      <div class="sidebar-view" id="sidebarTools" style="display:none;"></div>
+      <div class="sidebar-divider"></div>
+      <div class="sidebar-view" id="sidebarTools"></div>
     </div>
+    <button class="sidebar-collapse-btn" id="collapseSidebar" title="收起侧边栏">☰</button>
   </aside>
 
   <!-- 右侧主区域：聊天 -->
@@ -971,15 +979,29 @@
   // 渲染：技能视图 = 新增按钮 + 技能列表 + 待审批列表；工具视图 = 工具列表
   function renderSidebar() {
     const pendingBlock = allPending.length
-      ? `<div class="group-title">⏳ 待审批 (${allPending.length})</div>${pendingHTML(allPending)}`
+      ? `<div class="group-title">⏳ 待审批 (${allPending.length})</div>
+         <div class="collapsible-content">${pendingHTML(allPending)}</div>`
       : '';
     sidebarSkills.innerHTML =
       `<div style="padding:8px 8px 4px;"><button class="btn-add" id="addSkillBtn" style="width:100%;">+ 新增技能</button></div>
-       <div class="group-title">🧩 技能 (${allSkills.length})</div>${skillsHTML(allSkills)}
+       <div class="group-title" data-toggle="skills"><span>🧩 技能 (${allSkills.length})</span><span class="arrow">▼</span></div>
+       <div class="collapsible-content" id="skillsContent">${skillsHTML(allSkills)}</div>
        ${pendingBlock}`;
-    sidebarTools.innerHTML = toolsHTML(allTools);
+    sidebarTools.innerHTML =
+      `<div class="group-title" data-toggle="tools"><span>🛠️ 工具 (${allTools.length})</span><span class="arrow">▼</span></div>
+       <div class="collapsible-content" id="toolsContent">${toolsHTML(allTools)}</div>`;
     bindSidebarEvents();
   }
+
+  // 面板折叠/展开（事件委托，只绑定一次，避免重复绑定）
+  sidebar.addEventListener('click', (e) => {
+    const title = e.target.closest('.group-title[data-toggle]');
+    if (!title) return;
+    const content = title.nextElementSibling;
+    if (!content) return;
+    const isCollapsed = content.classList.toggle('collapsed');
+    title.classList.toggle('collapsed', isCollapsed);
+  });
 
   function bindSidebarEvents() {
     // 新增技能按钮
@@ -1020,19 +1042,7 @@
     });
   }
 
-  // 图标切换视图
-  const iconTabs = document.querySelectorAll('.activity-icon[data-view]');
-  const views = { skills: sidebarSkills, tools: sidebarTools };
-  iconTabs.forEach(btn => {
-    btn.addEventListener('click', () => {
-      iconTabs.forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      const view = btn.dataset.view;
-      Object.entries(views).forEach(([k, el]) => {
-        el.style.display = k === view ? '' : 'none';
-      });
-    });
-  });
+  // 技能和工具面板直接分开展示，无需切换
 
   async function loadSidebar() {
     try {

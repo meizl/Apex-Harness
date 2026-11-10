@@ -20,6 +20,10 @@ from .base import SkillMetadata
 class SkillToolAdapter(Tool):
     """把 SkillMetadata 包装成 Tool，run 返回 instructions 正文。"""
 
+    #: 标记这是技能适配器，前端展示工具列表时应过滤掉，
+    #: 但 LLM 调用时仍保留在工具表中。
+    is_skill_adapter: bool = True
+
     def __init__(self, metadata: SkillMetadata) -> None:
         self._metadata = metadata
         self.name = metadata.name

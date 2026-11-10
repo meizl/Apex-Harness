@@ -31,6 +31,7 @@ from langchain_core.messages import SystemMessage, message_to_dict
 from pydantic import BaseModel, Field
 
 from apex_harness.agent.orchestrator import Orchestrator
+from apex_harness.agent.subagent import SubAgentRegistryPlugin, builtin_subagents
 from apex_harness.core.kernel import Kernel
 from apex_harness.llm.openai import OpenAIProvider
 from apex_harness.server.tasks import TaskManager
@@ -142,6 +143,7 @@ async def lifespan(app: FastAPI):
         DeleteFileTool(),
         ShellExecTool(),
         WebFetchTool(),
+        SubAgentRegistryPlugin(builtin_subagents()),
     ])
     await kernel.start()
 
@@ -306,14 +308,36 @@ async def get_skills() -> list[dict[str, Any]]:
 
 @app.get("/api/tools")
 async def get_tools() -> list[dict[str, Any]]:
-    """返回当前已注册的工具列表（name + description + parameters）。"""
+    """返回当前已注册的工具列表（name + description + parameters）。
+
+    过滤掉技能适配器（SkillToolAdapter），技能由 ``/api/skills`` 单独展示。
+    """
     registry = app.state.kernel.services.require("tools")
     result = []
     for name, tool in registry.all.items():
+        # 跳过技能适配器，技能在 /api/skills 中展示
+        if getattr(tool, "is_skill_adapter", False):
+            continue
         result.append({
             "name": name,
             "description": getattr(tool, "description", "") or "",
             "parameters": getattr(tool, "parameters", {}) or {},
+        })
+    return result
+
+
+@app.get("/api/subagents")
+async def get_subagents() -> list[dict[str, Any]]:
+    """返回当前可用的子 Agent 列表（name + description + allowed_tools + timeout）。"""
+    registry = app.state.kernel.services.require("subagents")
+    result = []
+    for name, agent in registry.all.items():
+        result.append({
+            "name": agent.name,
+            "description": agent.description,
+            "allowed_tools": agent.allowed_tools,
+            "max_steps": agent.max_steps,
+            "timeout": agent.timeout,
         })
     return result
 
